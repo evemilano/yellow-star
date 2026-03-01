@@ -1,0 +1,37 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install pygame)",
+      "Bash(pip install pygame-ce)",
+      "Bash(python -c \"from src.game import Game; print\\(''Import OK - tutti i moduli caricati correttamente''\\)\")",
+      "Bash(python -c \":*)",
+      "Bash(python generate_enemies.py)",
+      "Bash(python -c \"from PIL import Image; print\\(''Pillow OK''\\)\")",
+      "Bash(pip install Pillow)",
+      "Bash(python:*)",
+      "WebFetch(domain:neat-python.readthedocs.io)",
+      "Bash(pip install neat-python)",
+      "Bash(ls -la /d/python/Yellow-Star/*.py)",
+      "Bash(xargs grep -l \"PIL\\\\|Pillow\\\\|Image.new\\\\|ImageDraw\")",
+      "Bash(xargs grep -l \"weapon_level\\\\|ship_01\\\\|ship_10\")",
+      "Bash(xargs grep -l \"generate\\\\|create\\\\|build\")",
+      "Bash(file /d/python/Yellow-Star/assets/images/player/ship_*.png)",
+      "Read(//c/Users/Utente/AppData/Roaming/Python/Python314/site-packages/neat/**)",
+      "Bash(python3 -c \"import neat; import inspect; print\\(inspect.getsource\\(neat.StatisticsReporter\\)\\)\")",
+      "Bash(python3 -c \"import neat; import inspect; src = inspect.getsource\\(neat.DefaultSpeciesSet\\); print\\(src[:3000]\\)\")",
+      "Bash(python3 -c \"import neat; import inspect; src = inspect.getsource\\(neat.DefaultStagnation\\); print\\(src[:3000]\\)\")",
+      "Bash(python3 -c \"import neat; import inspect; src = inspect.getsource\\(neat.Population\\); print\\(src[:4000]\\)\")",
+      "Bash(python3 -c \"import neat; import inspect; src = inspect.getsource\\(neat.Species\\); print\\(src\\)\")",
+      "Bash(C:/Python314/python.exe -c \"import py_compile; py_compile.compile\\(''src/neat_trainer.py'', doraise=True\\); print\\(''OK''\\)\")",
+      "Bash(ls d:/python/Yellow-Star/ai/neat-checkpoint-*)",
+      "Bash(sort -t- -k3 -n)",
+      "Bash(python3 -c \"import neat; print\\(neat.__file__\\)\")",
+      "Bash(venv/Scripts/pip install pygame-ce neat-python)",
+      "Bash(venv/Scripts/pip freeze)"
+    ],
+    "additionalDirectories": [
+      "D:\\python\\Yellow-Star",
+      "d:\\python\\Yellow-Star\\ai"
+    ]
+  }
+}
