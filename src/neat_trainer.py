@@ -8,6 +8,7 @@ Gestisce:
 - Modalita' "watch" per vedere il miglior genoma giocare
 """
 
+import glob
 import os
 import pickle
 import time
@@ -21,6 +22,7 @@ AI_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai")
 CONFIG_PATH = os.path.join(AI_DIR, "neat_config.txt")
 BEST_GENOME_PATH = os.path.join(AI_DIR, "best_genome.pkl")
 CHECKPOINT_PREFIX = os.path.join(AI_DIR, "neat-checkpoint-")
+MAX_CHECKPOINTS = 2  # mantieni solo gli ultimi N checkpoint
 SESSIONS_DIR = os.path.join(AI_DIR, "human_sessions")
 
 MAX_FRAMES_PER_EPISODE = 5400  # 3 minuti a 30 FPS
@@ -181,6 +183,27 @@ def _eval_genome_worker(args):
         }
 
 
+class _RollingCheckpointer(neat.Checkpointer):
+    """Checkpointer che mantiene solo gli ultimi MAX_CHECKPOINTS file."""
+
+    def save_checkpoint(self, config, population, species_set, generation):
+        super().save_checkpoint(config, population, species_set, generation)
+        self._cleanup_old_checkpoints()
+
+    @staticmethod
+    def _cleanup_old_checkpoints():
+        pattern = CHECKPOINT_PREFIX + "*"
+        files = glob.glob(pattern)
+        if len(files) <= MAX_CHECKPOINTS:
+            return
+        files.sort(key=lambda f: int(f.split("-")[-1]))
+        for old in files[:-MAX_CHECKPOINTS]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+
+
 class NeatTrainer:
     """Gestisce il ciclo di vita NEAT: training, salvataggio, replay."""
 
@@ -274,7 +297,7 @@ class NeatTrainer:
         p.add_reporter(neat.StdOutReporter(True))
         stats = neat.StatisticsReporter()
         p.add_reporter(stats)
-        p.add_reporter(neat.Checkpointer(
+        p.add_reporter(_RollingCheckpointer(
             generation_interval=10,
             filename_prefix=CHECKPOINT_PREFIX,
         ))

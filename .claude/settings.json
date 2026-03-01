@@ -27,7 +27,9 @@
       "Bash(sort -t- -k3 -n)",
       "Bash(python3 -c \"import neat; print\\(neat.__file__\\)\")",
       "Bash(venv/Scripts/pip install pygame-ce neat-python)",
-      "Bash(venv/Scripts/pip freeze)"
+      "Bash(venv/Scripts/pip freeze)",
+      "Bash(ls -la ai/neat-checkpoint-*)",
+      "Bash(ls ai/neat-checkpoint-*)"
     ],
     "additionalDirectories": [
       "D:\\python\\Yellow-Star",
