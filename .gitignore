@@ -12,8 +12,3 @@ build/
 *.swp
 *.swo
 *~
-ai/neat-checkpoint-*
-ai/neat-checkpoint-*
-ai/best_genome.pkl
-ai/human_sessions/
-scores.json
