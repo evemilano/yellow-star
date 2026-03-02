@@ -8,6 +8,10 @@
     "score": 66100
   },
   {
+    "name": "zio",
+    "score": 45800
+  },
+  {
     "name": "gio",
     "score": 33500
   },
@@ -34,9 +38,5 @@
   {
     "name": "gio",
     "score": 8300
-  },
-  {
-    "name": "gio",
-    "score": 7100
   }
 ]

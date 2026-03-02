@@ -4,8 +4,8 @@ TITLE = "Yellow Star"
 
 # Risoluzione e display
 SCREEN_WIDTH = 1280
-SCREEN_HEIGHT = 900
-FPS = 30
+SCREEN_HEIGHT = 740
+FPS = 60
 
 # Colori
 BLACK = (0, 0, 0)

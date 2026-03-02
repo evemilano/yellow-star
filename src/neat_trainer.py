@@ -141,8 +141,9 @@ def _eval_genome_worker(args):
     """Valuta un singolo genoma in un processo separato (per multiprocessing).
 
     Funzione top-level per essere picklable.
+    Restituisce (idx, fitness, env_stats) per imap_unordered.
     """
-    genome, config, max_frames, generation, seed = args
+    idx, _genome_id, genome, config, max_frames, generation, seed = args
 
     try:
         net = neat.nn.FeedForwardNetwork.create(genome, config)
@@ -167,10 +168,10 @@ def _eval_genome_worker(args):
 
         fitness, env_stats = _compute_fitness(env)
         env.close()
-        return fitness, env_stats
+        return idx, fitness, env_stats
     except Exception:
         # Ritorna fitness molto negativa per non bloccare il training
-        return -10000.0, {
+        return idx, -10000.0, {
             'score': 0, 'frame_count': 0, 'level': 1,
             'lives_lost': 0, 'powerups': 0, 'missiles': 0,
             'upgrades': 0, 'idle_frames': 0, 'enemies_killed': 0,
@@ -250,6 +251,7 @@ class NeatTrainer:
         self._best_genome_components = None
         self._current_gen_fitness_components = []
         self._new_record_this_gen = False
+        self._pool = None
 
     def _init_fonts(self):
         if self._font is None:
@@ -305,10 +307,22 @@ class NeatTrainer:
         self._population = p
         self._stats_reporter = stats
 
+        # Pool persistente per headless (evita di ricreare i processi ogni gen)
+        if headless:
+            num_workers = max(1, multiprocessing.cpu_count() - 1)
+            self._pool = multiprocessing.Pool(
+                processes=num_workers, initializer=_init_worker
+            )
+
         try:
             p.run(self._eval_genomes, generations)
         except _TrainingInterrupted:
             print("\nTraining interrotto dall'utente.")
+        finally:
+            if self._pool:
+                self._pool.terminate()
+                self._pool.join()
+                self._pool = None
 
         # Il miglior genoma e' gia' salvato incrementalmente in _eval_genomes
         if self.best_genome:
@@ -346,20 +360,20 @@ class NeatTrainer:
         max_frames = self._get_max_frames()
 
         if self._headless:
-            # ── Valutazione PARALLELA (headless) ──
-            num_workers = max(1, multiprocessing.cpu_count() - 1)
+            # ── Valutazione PARALLELA (headless, pool persistente) ──
             worker_args = [
-                (genome, config, max_frames, self.generation,
+                (idx, genome_id, genome, config, max_frames, self.generation,
                  genome_id + self.generation * 10000)
-                for genome_id, genome in genomes
+                for idx, (genome_id, genome) in enumerate(genomes)
             ]
 
-            with multiprocessing.Pool(processes=num_workers, initializer=_init_worker) as pool:
-                results = pool.map(_eval_genome_worker, worker_args)
-
-            for idx, ((genome_id, genome), (fitness, env_stats)) in enumerate(
-                zip(genomes, results)
+            # imap_unordered: i worker non restano mai idle in attesa
+            # dei genomi piu' lenti — appena uno finisce, parte il successivo
+            completed = 0
+            for idx, fitness, env_stats in self._pool.imap_unordered(
+                _eval_genome_worker, worker_args, chunksize=1
             ):
+                genome_id, genome = genomes[idx]
                 genome.fitness = fitness
                 self._collect_stats(genome, env_stats)
 
@@ -367,6 +381,17 @@ class NeatTrainer:
                     best_fitness_in_gen = genome.fitness
                     best_in_gen = genome
                     best_in_gen_idx = idx
+
+                completed += 1
+                # Aggiorna dashboard durante la valutazione
+                if self.screen and completed % 5 == 0:
+                    self._draw_stats_screen(completed, total, config)
+                    pygame.display.flip()
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
+                            raise _TrainingInterrupted()
+                        elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                            raise _TrainingInterrupted()
 
             # Aggiorna schermata finale
             if self.screen:

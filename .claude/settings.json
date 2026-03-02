@@ -29,7 +29,8 @@
       "Bash(venv/Scripts/pip install pygame-ce neat-python)",
       "Bash(venv/Scripts/pip freeze)",
       "Bash(ls -la ai/neat-checkpoint-*)",
-      "Bash(ls ai/neat-checkpoint-*)"
+      "Bash(ls ai/neat-checkpoint-*)",
+      "Bash(source venv/Scripts/activate)"
     ],
     "additionalDirectories": [
       "D:\\python\\Yellow-Star",
