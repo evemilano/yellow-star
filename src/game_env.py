@@ -267,6 +267,13 @@ class GameEnv:
         dt = 1.0
         prev_score = self.score
         prev_lives = self.player.lives
+        prev_kills = self.enemies_killed
+        prev_shield_hits = self.shield_hits
+        prev_shield_breaks = self.shield_breaks
+        prev_powerups = self.powerups_collected
+        prev_missiles = self.missiles_collected
+        prev_level = self.level_manager.level
+        prev_upgrades = self.total_upgrade_levels
 
         # Monkey-patch pygame.time.get_ticks per timing deterministico
         self._original_get_ticks = pygame.time.get_ticks
@@ -281,13 +288,27 @@ class GameEnv:
             self._original_get_ticks = None
 
         # Calcola reward delta
-        score_delta = self.score - prev_score
         lives_delta = prev_lives - self.player.lives
         if lives_delta > 0:
             self.lives_lost += lives_delta
 
-        reward = score_delta + 0.02  # piccolo bonus sopravvivenza
+        kills_delta = self.enemies_killed - prev_kills
+        reward = 0.02  # piccolo bonus sopravvivenza
+        reward += kills_delta * 5.0  # reward istantaneo per uccisioni
         reward -= lives_delta * 200
+        # Penalita' sparo per evitare spam
+        if getattr(self, '_shot_this_frame', False):
+            reward -= 0.01
+
+        # Reward istantanei per eventi discreti
+        reward -= (self.shield_hits - prev_shield_hits) * 15
+        reward -= (self.shield_breaks - prev_shield_breaks) * 60
+        reward += (self.powerups_collected - prev_powerups) * 10
+        reward += (self.missiles_collected - prev_missiles) * 5
+        level_delta = self.level_manager.level - prev_level
+        if level_delta > 0:
+            reward += self.level_manager.level ** 2 * 5.0
+        reward += (self.total_upgrade_levels - prev_upgrades) * 5
 
         # Near-miss: proiettili/nemici/asteroidi entro 60px senza collisione
         px = self.player.rect.centerx
@@ -304,7 +325,7 @@ class GameEnv:
                 if dist < near_dist:
                     self._near_miss_ids.add(sid)
                     self.near_misses += 1
-                    reward += 2.0
+                    reward += 3.0
 
         # Pulizia periodica near-miss IDs (rimuovi sprite non piu' in gioco)
         if self.frame_count % 300 == 0 and self._near_miss_ids:
@@ -313,10 +334,6 @@ class GameEnv:
                 for sprite in group:
                     alive_ids.add(id(sprite))
             self._near_miss_ids &= alive_ids
-
-        # Bonus posizione avanzata (non abbracciare bordo sinistro)
-        if px > 200:
-            reward += 0.01
 
         # Avvicinamento a powerup
         if self.powerups:
@@ -327,7 +344,7 @@ class GameEnv:
             dist = ((nearest.rect.centerx - px) ** 2 + (nearest.rect.centery - py) ** 2) ** 0.5
             if self._prev_powerup_dist is not None and dist < self._prev_powerup_dist:
                 self.powerup_approach_frames += 1
-                reward += 0.5
+                reward += 0.1
             self._prev_powerup_dist = dist
         else:
             self._prev_powerup_dist = None
@@ -369,6 +386,11 @@ class GameEnv:
             self.player.shoot(self.bullets)
             if len(self.bullets) > bullets_before:
                 self.shots_fired += 1
+                self._shot_this_frame = True
+            else:
+                self._shot_this_frame = False
+        else:
+            self._shot_this_frame = False
 
         # Missile
         if actions.get('missile', False):

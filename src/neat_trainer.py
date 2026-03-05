@@ -33,9 +33,9 @@ TRAIN_RENDER_SKIP = 4  # mostra 1 frame su 4
 
 # Terminazione anticipata genomi scarsi (check periodico)
 EARLY_STOP_INTERVAL = 150      # controlla ogni 5 secondi
-EARLY_STOP_MAX_LIVES_LOST = 2  # se ha gia' perso 2 vite, interrompi
-EARLY_STOP_IDLE_RATIO = 0.95   # se fermo per il 95% del tempo, interrompi
-EARLY_STOP_MIN_FRAME = 150     # non terminare prima di 5 secondi
+EARLY_STOP_MAX_LIVES_LOST = 3  # se ha gia' perso 3 vite (su 3), interrompi = game over
+EARLY_STOP_IDLE_RATIO = 0.70   # se fermo per il 70% del tempo, interrompi
+EARLY_STOP_MIN_FRAME = 180     # non terminare prima di 6 secondi
 
 # Generazioni prima di attivare l'imitation bonus
 IMITATION_START_GEN = 10
@@ -54,21 +54,21 @@ def _compute_fitness(env):
         accuracy_bonus = accuracy * env.enemies_killed * 10
 
     fitness = (
-        env.score * 2.0
-        + env.enemies_killed * 30
+        env.enemies_killed * 50
         + env.dodges * 5
         + accuracy_bonus
         + env.frame_count * 0.05
         - env.lives_lost * 200
-        + env.level_manager.level * 100
+        + env.level_manager.level ** 2 * 50
         + env.powerups_collected * 50
         + env.missiles_collected * 30
         + env.total_upgrade_levels * 20
-        - env.shield_hits * 30
-        - env.shield_breaks * 80
+        - env.shield_hits * 15
+        - env.shield_breaks * 120
         - idle_ratio * env.frame_count * 0.5
         + env.near_misses * 3
         + env.powerup_approach_frames * 0.1
+        - env.shots_fired * 0.01
     )
     # NON clippare a 0: i genomi pessimi devono avere fitness negativa
 
@@ -85,20 +85,20 @@ def _compute_fitness(env):
         'dodges': env.dodges,
         'accuracy': env.shots_hit / max(1, env.shots_fired),
         'near_misses': env.near_misses,
-        'comp_score': env.score * 2.0,
-        'comp_kills': env.enemies_killed * 30,
+        'comp_kills': env.enemies_killed * 50,
         'comp_dodges': env.dodges * 5,
         'comp_accuracy': accuracy_bonus,
         'comp_frames': env.frame_count * 0.05,
         'comp_lives': -env.lives_lost * 200,
-        'comp_level': env.level_manager.level * 100,
+        'comp_level': env.level_manager.level ** 2 * 50,
         'comp_powerups': env.powerups_collected * 50,
         'comp_missiles': env.missiles_collected * 30,
         'comp_upgrades': env.total_upgrade_levels * 20,
-        'comp_shield': -(env.shield_hits * 30 + env.shield_breaks * 80),
+        'comp_shield': -(env.shield_hits * 15 + env.shield_breaks * 120),
         'comp_idle': -(idle_ratio * env.frame_count * 0.5),
         'comp_near_misses': env.near_misses * 3,
         'comp_pu_approach': env.powerup_approach_frames * 0.1,
+        'comp_shoot_penalty': -env.shots_fired * 0.01,
     }
 
     return fitness, env_stats
@@ -123,7 +123,7 @@ def _decode_actions_static(output):
     return {
         'vertical': vertical,
         'horizontal': horizontal,
-        'shoot': output[2] > 0.0,
+        'shoot': output[2] > 0.3,
         'missile': output[3] > 0.5,
         'bomb': output[4] > 0.5,
     }
@@ -135,6 +135,14 @@ def _init_worker():
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     pygame.init()
     pygame.display.set_mode((1, 1))
+    # Imposta priorità bassa per non saturare le CPU
+    try:
+        import ctypes
+        BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+        handle = ctypes.windll.kernel32.GetCurrentProcess()
+        ctypes.windll.kernel32.SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
 
 
 def _eval_genome_worker(args):
@@ -157,8 +165,8 @@ def _eval_genome_worker(args):
 
             # Terminazione anticipata
             if frame >= EARLY_STOP_MIN_FRAME and frame % EARLY_STOP_INTERVAL == 0:
-                max_lives = EARLY_STOP_MAX_LIVES_LOST if generation >= 10 else PLAYER_LIVES
-                if env.lives_lost >= max_lives:
+                # Nelle prime gen, non terminare per vite (stanno imparando)
+                if generation >= 10 and env.lives_lost >= EARLY_STOP_MAX_LIVES_LOST:
                     break
                 if env.idle_frames / max(1, frame) >= EARLY_STOP_IDLE_RATIO:
                     break
@@ -176,7 +184,7 @@ def _eval_genome_worker(args):
             'lives_lost': 0, 'powerups': 0, 'missiles': 0,
             'upgrades': 0, 'idle_frames': 0, 'enemies_killed': 0,
             'dodges': 0, 'accuracy': 0, 'near_misses': 0,
-            'comp_score': 0, 'comp_kills': 0, 'comp_dodges': 0,
+            'comp_kills': 0, 'comp_dodges': 0,
             'comp_accuracy': 0, 'comp_frames': 0, 'comp_lives': 0,
             'comp_level': 0, 'comp_powerups': 0, 'comp_missiles': 0,
             'comp_upgrades': 0, 'comp_shield': 0, 'comp_idle': 0,
@@ -272,7 +280,7 @@ class NeatTrainer:
 
         # In headless: popolazione piu' grande per piu' diversita'
         if headless:
-            self.config.pop_size = 200
+            self.config.pop_size = 300
 
         # Cerca checkpoint per riprendere
         checkpoint = self._find_latest_checkpoint()
@@ -281,7 +289,7 @@ class NeatTrainer:
             p = neat.Checkpointer.restore_checkpoint(checkpoint)
             # Applica pop_size anche al checkpoint ripristinato
             if headless:
-                p.config.pop_size = 200
+                p.config.pop_size = 300
             # Sincronizza generazione interna con il checkpoint
             self.generation = p.generation
             print(f"  Generazione ripristinata: {self.generation}")
@@ -552,26 +560,42 @@ class NeatTrainer:
         species_set = self._population.species
         num_species = len(species_set.species)
 
-        # Se 1 sola specie: abbassa threshold per forzare speciazione
-        if num_species <= 1:
+        # Se troppo poche specie: abbassa threshold per forzare speciazione
+        if num_species <= 2:
             threshold = config.species_set_config.compatibility_threshold
-            if threshold > 0.5:
-                new_t = max(0.5, threshold * 0.9)
+            if threshold > 1.0:
+                new_t = max(1.0, threshold * 0.85)
                 config.species_set_config.compatibility_threshold = new_t
                 print(f"  [Anti-stagnazione] Threshold abbassato: {threshold:.2f} -> {new_t:.2f}")
+        # Se troppe specie: alza threshold per evitare frammentazione
+        elif num_species > 20:
+            threshold = config.species_set_config.compatibility_threshold
+            new_t = min(6.0, threshold * 1.1)
+            config.species_set_config.compatibility_threshold = new_t
+            print(f"  [Anti-stagnazione] Troppe specie ({num_species}), threshold alzato: {threshold:.2f} -> {new_t:.2f}")
 
-        # Se fitness media non migliora da 30 gen: inietta diversita'
-        if len(self._fitness_history) >= 30:
-            recent_avgs = [h[0] for h in self._fitness_history[-30:]]
-            improvement = max(recent_avgs) - min(recent_avgs)
-            pct = improvement / max(1, abs(recent_avgs[0])) * 100
-            if pct < 5:  # meno del 5% di miglioramento in 30 gen
+        # Se BEST fitness non migliora da 20 gen: inietta diversita'
+        if len(self._fitness_history) >= 20:
+            recent_bests = [h[1] for h in self._fitness_history[-20:]]
+            improvement = max(recent_bests) - min(recent_bests)
+            pct = improvement / max(1, abs(recent_bests[0])) * 100
+            if pct < 3:  # meno del 3% di miglioramento in 20 gen
                 self._inject_fresh_genomes(config)
 
-    def _inject_fresh_genomes(self, config):
-        """Sostituisce il 10% peggiore con genomi freschi random."""
+        # Boost mutazione se stagnazione profonda (50+ gen senza miglioramento)
+        if len(self._fitness_history) >= 50:
+            recent_bests = [h[1] for h in self._fitness_history[-50:]]
+            improvement = max(recent_bests) - min(recent_bests)
+            pct = improvement / max(1, abs(recent_bests[0])) * 100
+            if pct < 5:
+                self._inject_fresh_genomes(config, aggressive=True)
+                print(f"  [Anti-stagnazione] Stagnazione profonda! Iniezione aggressiva.")
+
+    def _inject_fresh_genomes(self, config, aggressive=False):
+        """Sostituisce genomi peggiori con mix di freschi e mutati dal best."""
         pop = self._population.population
-        num_replace = max(5, len(pop) // 10)
+        pct = 0.25 if aggressive else 0.15
+        num_replace = max(10, int(len(pop) * pct))
 
         sorted_genomes = sorted(
             pop.items(), key=lambda x: x[1].fitness or -float('inf')
@@ -580,12 +604,38 @@ class NeatTrainer:
             del pop[gid]
 
         new_id = max(pop.keys()) + 1
-        for i in range(num_replace):
+        num_fresh = num_replace // 2  # meta' completamente nuovi
+        num_mutated = num_replace - num_fresh  # meta' mutati dal best
+
+        # Genomi freschi random
+        for i in range(num_fresh):
             g = config.genome_type(new_id + i)
             g.configure_new(config.genome_config)
             pop[new_id + i] = g
 
-        print(f"  [Anti-stagnazione] Iniettati {num_replace} genomi freschi")
+        # Genomi mutati dal miglior genoma (se esiste)
+        if self.best_genome:
+            import copy
+            for i in range(num_mutated):
+                gid = new_id + num_fresh + i
+                g = copy.deepcopy(self.best_genome)
+                g.key = gid
+                # Muta pesantemente
+                g.mutate(config.genome_config)
+                g.mutate(config.genome_config)  # doppia mutazione
+                if aggressive:
+                    g.mutate(config.genome_config)  # tripla se aggressivo
+                g.fitness = None
+                pop[gid] = g
+        else:
+            # Se non c'e' best, tutti freschi
+            for i in range(num_mutated):
+                gid = new_id + num_fresh + i
+                g = config.genome_type(gid)
+                g.configure_new(config.genome_config)
+                pop[gid] = g
+
+        print(f"  [Anti-stagnazione] Iniettati {num_fresh} freschi + {num_mutated} mutati dal best")
 
     def _draw_training_overlay(self, env, genome_num, total, frame):
         """Disegna l'overlay con info training sopra il gioco."""
@@ -775,7 +825,6 @@ class NeatTrainer:
         y += 18
 
         items = [
-            ("Score",      comp['comp_score'],                      (100, 255, 100)),
             ("Kills",      comp.get('comp_kills', 0),               (120, 255, 120)),
             ("Schivate",   comp.get('comp_dodges', 0),              (100, 220, 180)),
             ("Near-miss",  comp.get('comp_near_misses', 0),         (100, 255, 200)),

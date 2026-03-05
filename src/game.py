@@ -715,7 +715,7 @@ class Game:
         return {
             'vertical': vertical,
             'horizontal': horizontal,
-            'shoot': output[2] > 0.0,
+            'shoot': output[2] > 0.3,
             'missile': output[3] > 0.5,
             'bomb': output[4] > 0.5,
         }
