@@ -87,6 +87,11 @@ ENEMY_SHOOTER_CHANCE = [
 # Livello di sblocco per ogni tipo di shooter
 ENEMY_SHOOTER_UNLOCK = {"basic": 3, "fast": 4, "aimed": 6, "burst": 10}
 
+# ── Biomi dello sfondo ──
+BIOME_DURATION = 60000        # ms di permanenza in uno scenario (1 minuto)
+BIOME_FADE_DURATION = 3000    # ms di dissolvenza tra uno scenario e l'altro
+BIOME_SPACE_LEVEL = 90        # da questo livello lo sfondo diventa lo spazio
+
 # Parallasse - paesaggio
 PARALLAX_MOUNTAIN_FAR_SPEED = 0.3
 PARALLAX_MOUNTAIN_MID_SPEED = 0.6

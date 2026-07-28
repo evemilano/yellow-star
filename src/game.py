@@ -204,7 +204,7 @@ class Game:
 
         lm = self.level_manager
 
-        self.background.update(dt)
+        self.background.update(dt, lm.level)
         self.player.update(dt)
         self.bullets.update(dt)
         self.missiles.update(dt)
