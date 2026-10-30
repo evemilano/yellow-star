@@ -318,7 +318,7 @@ fitness = enemies_killed × 50          # bullet kills
         - shield_breaks × 120
         - idle_seconds × 15            # time in which the ship did not move
         + near_misses × 3              # sprites that came within 60 px
-        + approach_seconds × 3         # time spent moving towards the nearest power-up
+        + max(0, approach_seconds) × 3 # net time spent moving towards the nearest power-up
         - shots_fired × 0.01
 ```
 
@@ -327,7 +327,7 @@ fitness = enemies_killed × 50          # bullet kills
 How the counters are measured in `GameEnv`:
 - **Kills**: `enemies_killed` counts bullet kills, `missile_kills` the kills of every missile (counted on the snapshot taken before `missiles.update()`, so the kills of the frame in which a missile is spent or leaves the screen are included), `bomb_kills` the enemies cleared by a bomb.
 - **Idle**: a frame is idle when the ship's rect did not change after the movement and the screen clamp, so holding a direction against an edge counts as idle.
-- **Power-up approach**: a frame counts when the ship's own movement brings it closer to the nearest power-up, measured against the power-up's position before it drifts (power-ups drifting towards a still ship do not count).
+- **Power-up approach**: a net counter: `+1` for a frame in which the ship's own movement brings it closer to the nearest power-up, `-1` for a frame in which it moves it away, measured against the power-up's position before it drifts (power-ups drifting towards a still ship do not count). Oscillating near a power-up therefore earns nothing; the fitness uses the balance clipped at 0.
 - **Near-miss**: an enemy, asteroid or enemy bullet counts once, the first time its center comes within 60 px of the ship's center (the mark is stored on the sprite).
 - **Dodges**: an enemy or asteroid that leaves the screen after a near-miss without having hit the ship; enemies destroyed by any weapon or by ramming never count, nor do asteroids that hit the ship.
 
@@ -342,7 +342,7 @@ Fitness is not clipped at 0. `shots_fired` counts volleys, `shots_hit` counts bu
 - Pickups: `+10` per upgrade power-up, `+5` per missile pickup, `+5` per upgrade level gained
 - Level up: `+level² × 5`
 - Near-miss bonus: `+3.0` the first time an enemy, asteroid or enemy bullet comes within 60 px of the player
-- Power-up approach: `+0.1` per frame in which the ship moves closer to the nearest power-up
+- Power-up approach: `+0.1` per frame in which the ship moves closer to the nearest power-up, `-0.1` per frame in which it moves away
 
 **Early termination** (constants in seconds converted with `FPS`, `EARLY_STOP_*`, shared by headless workers and visual mode through `_early_stop()`): from 6 s (`EARLY_STOP_MIN_FRAME`, 360 frames) the episode is checked every 5 s (`EARLY_STOP_INTERVAL`, 300 frames), i.e. at frame 600, 900, 1200, … The genome is stopped if, from generation 10 (`EARLY_STOP_LIVES_GEN`), it has lost 2 of its 3 lives (`EARLY_STOP_MAX_LIVES_LOST`), or if it has been idle (not moving, edges included) for at least 70% of the frames (`EARLY_STOP_IDLE_RATIO`). Validation episodes have no early termination.
 

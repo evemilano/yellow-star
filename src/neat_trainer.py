@@ -95,7 +95,8 @@ def _compute_fitness(env):
         + power-up x 50 + missili raccolti x 30 + livelli upgrade x 20
         - colpi allo scudo x 15 - scudi rotti x 120
         - secondi fermo x 15 + near-miss x 3
-        + secondi in avvicinamento a un power-up x 3 - raffiche x 0.01
+        + saldo netto (>= 0) dei secondi in avvicinamento a un power-up x 3
+        - raffiche x 0.01
 
     Ritorna (fitness, env_stats).
     """
@@ -120,7 +121,7 @@ def _compute_fitness(env):
         'comp_shield': -(env.shield_hits * 15 + env.shield_breaks * 120),
         'comp_idle': -(env.idle_frames / FPS * 15),
         'comp_near_misses': env.near_misses * 3,
-        'comp_pu_approach': env.powerup_approach_frames / FPS * 3,
+        'comp_pu_approach': max(0, env.powerup_approach_frames) / FPS * 3,
         'comp_shoot_penalty': -env.shots_fired * 0.01,
     }
     # NON clippare a 0: i genomi pessimi devono avere fitness negativa

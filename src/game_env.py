@@ -214,13 +214,15 @@ class GameEnv:
         self.shots_fired = 0
         self.shots_hit = 0
         self.near_misses = 0      # sprite arrivati entro 60px (uno per sprite)
-        self.powerup_approach_frames = 0  # frame in cui la nave si avvicina al power-up
+        # Saldo netto dei frame in cui la nave si avvicina (+1) o si allontana
+        # (-1) dal power-up piu' vicino: oscillare non accumula nulla
+        self.powerup_approach_frames = 0
 
         # Missile e bomba scattano sul fronte di salita dell'azione (come il
         # KEYDOWN umano): valori del frame precedente
         self._prev_missile = False
         self._prev_bomb = False
-        self._approach_this_frame = False
+        self._approach_delta = 0
 
         # Game over
         self.done = False
@@ -255,7 +257,10 @@ class GameEnv:
         self.player.shield_just_broke = False
         self.player.shield_break_timer = 0.0
         self.player.bombs = 0
-        self.player.last_shot = 0
+        # Sparo disponibile da subito, come in Game (dove get_ticks() parte gia'
+        # oltre il cooldown): con last_shot = 0 e tempo virtuale 0 i primi
+        # shoot_delay ms avrebbero cooldown pieno
+        self.player.last_shot = -self.player.upgrades.shoot_delay
 
         self.bullets.empty()
         self.missiles.empty()
@@ -285,7 +290,7 @@ class GameEnv:
         self.powerup_approach_frames = 0
         self._prev_missile = False
         self._prev_bomb = False
-        self._approach_this_frame = False
+        self._approach_delta = 0
         self.done = False
 
         self.last_enemy_spawn = 0
@@ -380,8 +385,7 @@ class GameEnv:
 
         # Avvicinamento a power-up: solo lo spostamento della nave in questo
         # frame (misurato in _apply_actions), non lo scorrimento del power-up
-        if self._approach_this_frame:
-            reward += 0.1
+        reward += self._approach_delta * 0.1
 
         # Rendering opzionale
         if draw and self.render_mode and self.screen is not None:
@@ -417,13 +421,15 @@ class GameEnv:
         rect = self.player.rect
         if rect.topleft == pos_before:
             self.idle_frames += 1
-        self._approach_this_frame = False
+        self._approach_delta = 0
         if target is not None:
             px, py = rect.center
             dist_after = (target.rect.centerx - px) ** 2 + (target.rect.centery - py) ** 2
             if dist_after < dist_before:
-                self.powerup_approach_frames += 1
-                self._approach_this_frame = True
+                self._approach_delta = 1
+            elif dist_after > dist_before:
+                self._approach_delta = -1
+            self.powerup_approach_frames += self._approach_delta
 
         # Gestione invincibilita'
         if self.player.invincible:
