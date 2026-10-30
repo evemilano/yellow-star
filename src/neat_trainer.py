@@ -4,74 +4,127 @@ Gestisce:
 - Evoluzione della popolazione NEAT
 - Valutazione fitness dei genomi (con rendering live)
 - Bonus imitation dalle sessioni umane
-- Persistenza (salva/carica genomi e checkpoint)
+- Validazione del miglior genoma su una suite di seed fissi
+- Persistenza (salva/carica genomi, record di validazione e checkpoint)
 - Modalita' "watch" per vedere il miglior genoma giocare
 """
 
+import datetime
 import glob
+import gzip
+import json
 import math
 import os
 import pickle
+import random
 import time
+import traceback
 import multiprocessing
 import neat
 import pygame
-from settings import SCREEN_WIDTH, SCREEN_HEIGHT, FPS, PLAYER_LIVES
+from settings import SCREEN_WIDTH, SCREEN_HEIGHT, FPS
 from src.game_env import GameEnv
 
 AI_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai")
 CONFIG_PATH = os.path.join(AI_DIR, "neat_config.txt")
 BEST_GENOME_PATH = os.path.join(AI_DIR, "best_genome.pkl")
+# Record di validazione di best_genome.pkl (media, seed, versione della fitness)
+BEST_GENOME_META_PATH = os.path.join(AI_DIR, "best_genome_meta.json")
 CHECKPOINT_PREFIX = os.path.join(AI_DIR, "neat-checkpoint-")
 MAX_CHECKPOINTS = 2  # mantieni solo gli ultimi N checkpoint
 SESSIONS_DIR = os.path.join(AI_DIR, "human_sessions")
 
-MAX_FRAMES_PER_EPISODE = 5400  # 3 minuti a 30 FPS
-MIN_FRAMES_PER_EPISODE = 900   # 30 secondi minimo
+# Durate in secondi di gioco, convertite in frame con settings.FPS (GameEnv
+# avanza di 1000/FPS ms a ogni step)
+MAX_EPISODE_SECONDS = 180  # 3 minuti
+MIN_EPISODE_SECONDS = 30   # alla generazione 0, poi cresce fino a MAX in 50 gen
+MAX_FRAMES_PER_EPISODE = int(MAX_EPISODE_SECONDS * FPS)  # 10800 a 60 FPS
+MIN_FRAMES_PER_EPISODE = int(MIN_EPISODE_SECONDS * FPS)  # 1800 a 60 FPS
 
 # Velocita' di rendering durante il training visuale
 TRAIN_RENDER_SKIP = 4  # mostra 1 frame su 4
 
-# Terminazione anticipata genomi scarsi (check periodico)
-EARLY_STOP_INTERVAL = 150      # controlla ogni 5 secondi
-EARLY_STOP_MAX_LIVES_LOST = 3  # se ha gia' perso 3 vite (su 3), interrompi = game over
-EARLY_STOP_IDLE_RATIO = 0.70   # se fermo per il 70% del tempo, interrompi
-EARLY_STOP_MIN_FRAME = 180     # non terminare prima di 6 secondi
+# Popolazione del training headless (il visuale usa pop_size di neat_config.txt)
+HEADLESS_POP_SIZE = 200
 
-# Generazioni prima di attivare l'imitation bonus
+# Episodi per genoma: stessi seed per tutti i genomi della generazione
+# (common random numbers), nuovi a ogni generazione; fitness = media
+EPISODES_PER_GENOME = 2
+
+# Terminazione anticipata genomi scarsi (check periodico, in secondi di gioco)
+EARLY_STOP_INTERVAL = int(5 * FPS)   # controlla ogni 5 secondi
+EARLY_STOP_MIN_FRAME = int(6 * FPS)  # non terminare prima di 6 secondi
+EARLY_STOP_MAX_LIVES_LOST = 2  # 2 vite perse su PLAYER_LIVES (3): interrompi
+EARLY_STOP_LIVES_GEN = 10      # nelle prime generazioni non terminare per vite
+EARLY_STOP_IDLE_RATIO = 0.70   # se fermo per il 70% del tempo, interrompi
+
+# Imitation bonus: generazione di attivazione, tetto, sessioni usate
 IMITATION_START_GEN = 10
+IMITATION_MAX_BONUS = 300
+IMITATION_TOP_SESSIONS = 5           # le sessioni con lo score piu' alto
+IMITATION_SAMPLES_PER_SESSION = 200  # frame equidistanti per sessione
+IMITATION_WEIGHT_CAP = 4.0           # peso = min(tetto, ln(1 + score / 1000))
+
+# Versione della fitness: incrementarla quando cambiano _compute_fitness, le
+# regole di GameEnv o la suite di validazione. Il record di validazione
+# salvato con un'altra versione non e' confrontabile e viene ricalcolato;
+# riprendendo un checkpoint di un'altra versione si azzera lo storico di
+# fitness delle specie (vedi NeatTrainer._reset_species_history)
+FITNESS_VERSION = 2
+
+# Validazione del best: a fine generazione i VALIDATION_TOP_K genomi con la
+# fitness di gioco piu' alta giocano un episodio intero (MAX_FRAMES_PER_EPISODE,
+# niente early stop, niente imitation) per ogni seed fisso; best_genome.pkl
+# e' il genoma con la media piu' alta, se batte il record
+VALIDATION_TOP_K = 5
+VALIDATION_SEEDS = tuple(range(10 ** 9, 10 ** 9 + 10))  # fuori dalla serie del training
 
 
 def _compute_fitness(env):
     """Calcola fitness e statistiche da un GameEnv dopo la simulazione.
 
     Funzione top-level (picklable) usata sia dal worker che da _eval_single.
+    I termini a tempo sono in secondi di gioco (frame / FPS), quindi i pesi
+    non dipendono da settings.FPS. La fitness e' la somma dei componenti
+    comp_* di env_stats:
+
+        (uccisioni a proiettile + da missile + da bomba) x 50
+        + accuracy x uccisioni a proiettile x 10
+        + schivate x 5 (passaggi ravvicinati senza collisione)
+        + secondi x 1.5 - vite perse x 200 + livello^2 x 50
+        + power-up x 50 + missili raccolti x 30 + livelli upgrade x 20
+        - colpi allo scudo x 15 - scudi rotti x 120
+        - secondi fermo x 15 + near-miss x 3
+        + secondi in avvicinamento a un power-up x 3 - raffiche x 0.01
+
     Ritorna (fitness, env_stats).
     """
-    idle_ratio = env.idle_frames / max(1, env.frame_count)
     accuracy_bonus = 0.0
     if env.shots_fired > 0:
         accuracy = env.shots_hit / env.shots_fired
+        # Solo le uccisioni a proiettile: l'accuracy misura i proiettili
         accuracy_bonus = accuracy * env.enemies_killed * 10
 
-    fitness = (
-        env.enemies_killed * 50
-        + env.dodges * 5
-        + accuracy_bonus
-        + env.frame_count * 0.05
-        - env.lives_lost * 200
-        + env.level_manager.level ** 2 * 50
-        + env.powerups_collected * 50
-        + env.missiles_collected * 30
-        + env.total_upgrade_levels * 20
-        - env.shield_hits * 15
-        - env.shield_breaks * 120
-        - idle_ratio * env.frame_count * 0.5
-        + env.near_misses * 3
-        + env.powerup_approach_frames * 0.1
-        - env.shots_fired * 0.01
-    )
+    components = {
+        'comp_kills': env.enemies_killed * 50,
+        'comp_missile_kills': env.missile_kills * 50,
+        'comp_bomb_kills': env.bomb_kills * 50,
+        'comp_dodges': env.dodges * 5,
+        'comp_accuracy': accuracy_bonus,
+        'comp_frames': env.frame_count / FPS * 1.5,
+        'comp_lives': -env.lives_lost * 200,
+        'comp_level': env.level_manager.level ** 2 * 50,
+        'comp_powerups': env.powerups_collected * 50,
+        'comp_missiles': env.missiles_collected * 30,
+        'comp_upgrades': env.total_upgrade_levels * 20,
+        'comp_shield': -(env.shield_hits * 15 + env.shield_breaks * 120),
+        'comp_idle': -(env.idle_frames / FPS * 15),
+        'comp_near_misses': env.near_misses * 3,
+        'comp_pu_approach': env.powerup_approach_frames / FPS * 3,
+        'comp_shoot_penalty': -env.shots_fired * 0.01,
+    }
     # NON clippare a 0: i genomi pessimi devono avere fitness negativa
+    fitness = sum(components.values())
 
     env_stats = {
         'score': env.score,
@@ -83,26 +136,58 @@ def _compute_fitness(env):
         'upgrades': env.total_upgrade_levels,
         'idle_frames': env.idle_frames,
         'enemies_killed': env.enemies_killed,
+        'missile_kills': env.missile_kills,
+        'bomb_kills': env.bomb_kills,
         'dodges': env.dodges,
         'accuracy': env.shots_hit / max(1, env.shots_fired),
         'near_misses': env.near_misses,
-        'comp_kills': env.enemies_killed * 50,
-        'comp_dodges': env.dodges * 5,
-        'comp_accuracy': accuracy_bonus,
-        'comp_frames': env.frame_count * 0.05,
-        'comp_lives': -env.lives_lost * 200,
-        'comp_level': env.level_manager.level ** 2 * 50,
-        'comp_powerups': env.powerups_collected * 50,
-        'comp_missiles': env.missiles_collected * 30,
-        'comp_upgrades': env.total_upgrade_levels * 20,
-        'comp_shield': -(env.shield_hits * 15 + env.shield_breaks * 120),
-        'comp_idle': -(idle_ratio * env.frame_count * 0.5),
-        'comp_near_misses': env.near_misses * 3,
-        'comp_pu_approach': env.powerup_approach_frames * 0.1,
-        'comp_shoot_penalty': -env.shots_fired * 0.01,
+        **components,
     }
 
     return fitness, env_stats
+
+
+def _empty_env_stats():
+    """Statistiche di un genoma la cui valutazione e' fallita (tutte a zero)."""
+    stats = {
+        'score': 0, 'frame_count': 0, 'level': 1, 'lives_lost': 0,
+        'powerups': 0, 'missiles': 0, 'upgrades': 0, 'idle_frames': 0,
+        'enemies_killed': 0, 'missile_kills': 0, 'bomb_kills': 0,
+        'dodges': 0, 'accuracy': 0, 'near_misses': 0,
+    }
+    for key in ('comp_kills', 'comp_missile_kills', 'comp_bomb_kills',
+                'comp_dodges', 'comp_accuracy', 'comp_frames', 'comp_lives',
+                'comp_level', 'comp_powerups', 'comp_missiles', 'comp_upgrades',
+                'comp_shield', 'comp_idle', 'comp_near_misses',
+                'comp_pu_approach', 'comp_shoot_penalty'):
+        stats[key] = 0
+    return stats
+
+
+def _mean_stats(stats_list):
+    """Media chiave per chiave delle env_stats di piu' episodi."""
+    n = len(stats_list)
+    return {k: sum(s[k] for s in stats_list) / n for k in stats_list[0]}
+
+
+def _generation_seeds(generation):
+    """Seed comuni a tutti i genomi della generazione (common random numbers)."""
+    return tuple(generation * 1000 + k for k in range(EPISODES_PER_GENOME))
+
+
+def _early_stop(env, frame, generation):
+    """Terminazione anticipata dei genomi scarsi (check periodico).
+
+    Unica regola per il worker e per _eval_single (stessa fitness in headless
+    e nel visuale). `frame` e' l'indice del frame appena giocato.
+    """
+    if frame < EARLY_STOP_MIN_FRAME or frame % EARLY_STOP_INTERVAL != 0:
+        return False
+    # Nelle prime generazioni non terminare per vite perse (servono dati)
+    if generation >= EARLY_STOP_LIVES_GEN and env.lives_lost >= EARLY_STOP_MAX_LIVES_LOST:
+        return True
+    # Troppo inattivo: fermo (anche premendo contro il bordo) quasi sempre
+    return env.idle_frames / max(1, frame) >= EARLY_STOP_IDLE_RATIO
 
 
 def _decode_actions_static(output):
@@ -171,41 +256,105 @@ def compile_network(genome, config):
     return ns["act"]
 
 
-def _imitation_bonus_from_samples(act, samples):
-    """Bonus fitness per somiglianza alle azioni umane registrate (max ~300).
+# Componenti confrontate dall'imitation bonus e loro valori: missile e bomba
+# sono esclusi (nelle sessioni umane sono pressioni rarissime, quindi il
+# confronto premierebbe solo il non usarli mai)
+_IMITATION_COMPONENTS = {
+    'vertical': (-1, 0, 1),
+    'horizontal': (-1, 0, 1),
+    'shoot': (False, True),
+}
+
+
+def _component_agreement(component, ai_value, human_value):
+    """Accordo (0-1) su una componente: assi 1 / 0.5 (adiacente) / 0, sparo 1 / 0."""
+    if component == 'shoot':
+        return 1.0 if ai_value == human_value else 0.0
+    diff = abs(ai_value - human_value)
+    if diff == 0:
+        return 1.0
+    return 0.5 if diff == 1 else 0.0
+
+
+def _action_frequencies(samples, actions=None):
+    """Frequenze pesate dei valori di ogni componente.
+
+    Senza `actions` sono quelle delle azioni umane dei campioni, altrimenti
+    quelle di `actions` (una per campione, stesso ordine). None se il peso
+    totale e' zero.
+    """
+    total = sum(w for _, _, w in samples)
+    if total <= 0:
+        return None
+    freq = {c: dict.fromkeys(values, 0.0) for c, values in _IMITATION_COMPONENTS.items()}
+    for i, (_obs, human_action, weight) in enumerate(samples):
+        action = human_action if actions is None else actions[i]
+        for c in freq:
+            freq[c][action[c]] += weight / total
+    return freq
+
+
+def _chance_similarity(ai_freq, human_freq):
+    """Somiglianza attesa tra due policy indipendenti dall'osservazione.
+
+    E' la somiglianza che otterrebbe una policy con le stesse frequenze
+    d'azione del genoma ma scelte a caso rispetto allo stato: per una policy
+    costante coincide con la sua somiglianza effettiva.
+    """
+    total = 0.0
+    for c, values in _IMITATION_COMPONENTS.items():
+        total += sum(
+            _component_agreement(c, a, h) * ai_freq[c][a] * human_freq[c][h]
+            for a in values for h in values
+        )
+    return total / len(_IMITATION_COMPONENTS)
+
+
+def _imitation_bonus_from_samples(act, samples, human_freq):
+    """Bonus fitness per somiglianza alle azioni umane registrate (0-300).
 
     `act` e' la rete compilata del genoma, `samples` la lista di tuple
-    (obs, azione umana, peso) estratta da NeatTrainer._load_imitation_samples.
+    (obs, azione umana, peso) e `human_freq` le frequenze pesate delle azioni
+    umane, entrambi da NeatTrainer._load_imitation_samples. Conta solo la
+    somiglianza oltre quella dovuta alle frequenze d'azione del genoma
+    (kappa di Cohen pesato):
+        bonus = max(0, sim - sim_caso) / (1 - sim_caso) * 300
+    Ogni policy costante (ferma, sempre a sparare...) e ogni policy casuale
+    indipendente dallo stato prendono 0: rende solo agire come l'umano
+    nelle stesse situazioni.
     """
-    total_match = 0
-    total_weight = 0
-    for obs, human_action, score_weight in samples:
-        ai_action = _decode_actions_static(act(obs))
-        match = NeatTrainer._action_similarity(ai_action, human_action)
-        total_match += match * score_weight
-        total_weight += score_weight
-
-    if total_weight == 0:
+    if not samples or human_freq is None:
         return 0.0
-
-    # Max bonus ~300 punti
+    actions = [_decode_actions_static(act(obs)) for obs, _, _ in samples]
+    total_match = 0.0
+    total_weight = 0.0
+    for action, (_obs, human_action, weight) in zip(actions, samples):
+        total_match += NeatTrainer._action_similarity(action, human_action) * weight
+        total_weight += weight
     similarity = total_match / total_weight
-    return similarity * 300
+    chance = _chance_similarity(_action_frequencies(samples, actions), human_freq)
+    # Margine minimo: per una policy costante sim e sim_caso coincidono a
+    # meno dell'arrotondamento
+    if chance >= 1.0 or similarity - chance <= 1e-9:
+        return 0.0
+    return (similarity - chance) / (1.0 - chance) * IMITATION_MAX_BONUS
 
 
-# Campioni per l'imitation bonus nel processo worker (impostati da _init_worker)
+# Imitation bonus nel processo worker (impostati da _init_worker)
 _IMITATION_SAMPLES = None
+_IMITATION_HUMAN_FREQ = None
 
 
-def _init_worker(imitation_samples=None):
+def _init_worker(imitation_samples=None, imitation_human_freq=None):
     """Inizializza pygame in ogni processo worker del Pool.
 
-    `imitation_samples` sono i campioni estratti in train() prima di creare
-    il Pool: il worker calcola l'imitation bonus in parallelo invece di
-    lasciarlo in serie al processo principale.
+    `imitation_samples` e `imitation_human_freq` sono estratti in train()
+    prima di creare il Pool: il worker calcola l'imitation bonus in parallelo
+    invece di lasciarlo in serie al processo principale.
     """
-    global _IMITATION_SAMPLES
+    global _IMITATION_SAMPLES, _IMITATION_HUMAN_FREQ
     _IMITATION_SAMPLES = imitation_samples
+    _IMITATION_HUMAN_FREQ = imitation_human_freq
     import os
     os.environ["SDL_VIDEODRIVER"] = "dummy"
     os.environ["SDL_AUDIODRIVER"] = "dummy"  # i worker non aprono il device audio
@@ -221,73 +370,121 @@ def _init_worker(imitation_samples=None):
         pass
 
 
+def _run_episode(act, seed, max_frames, generation=None):
+    """Gioca un episodio headless e ritorna (fitness, env_stats).
+
+    Con `generation` applica l'early stop del training (_early_stop); con
+    None (suite di validazione) l'episodio dura fino al game over o a
+    max_frames, come una partita in coop.
+    """
+    env = GameEnv(render=False, screen=None)
+    obs = env.reset(seed=seed)
+    for frame in range(max_frames):
+        obs, reward, done = env.step(_decode_actions_static(act(obs)))
+        if done:
+            break
+        if generation is not None and _early_stop(env, frame, generation):
+            break
+    result = _compute_fitness(env)
+    env.close()
+    return result
+
+
 def _eval_genome_worker(args):
     """Valuta un singolo genoma in un processo separato (per multiprocessing).
 
-    Funzione top-level per essere picklable.
-    Restituisce (idx, fitness, env_stats, imitation_bonus) per imap_unordered.
+    Funzione top-level per essere picklable. Gioca un episodio per ogni seed
+    della generazione. Restituisce (idx, fitness, env_stats, imitation_bonus)
+    per imap_unordered: fitness e statistiche sono la media sugli episodi.
     """
-    idx, _genome_id, genome, config, max_frames, generation, seed = args
+    idx, genome, config, max_frames, generation, seeds = args
 
     try:
         act = compile_network(genome, config)
-        env = GameEnv(render=False, screen=None)
-        obs = env.reset(seed=seed)
-
-        for frame in range(max_frames):
-            output = act(obs)
-            actions = _decode_actions_static(output)
-            obs, reward, done = env.step(actions)
-
-            # Terminazione anticipata
-            if frame >= EARLY_STOP_MIN_FRAME and frame % EARLY_STOP_INTERVAL == 0:
-                # Nelle prime gen, non terminare per vite (stanno imparando)
-                if generation >= 10 and env.lives_lost >= EARLY_STOP_MAX_LIVES_LOST:
-                    break
-                if env.idle_frames / max(1, frame) >= EARLY_STOP_IDLE_RATIO:
-                    break
-
-            if done:
-                break
-
-        fitness, env_stats = _compute_fitness(env)
-        env.close()
+        results = [_run_episode(act, seed, max_frames, generation) for seed in seeds]
+        fitness = sum(f for f, _ in results) / len(results)
+        env_stats = _mean_stats([s for _, s in results])
 
         # Imitation bonus calcolato qui, in parallelo, invece che nel main
         imitation_bonus = 0.0
         if _IMITATION_SAMPLES is not None and generation >= IMITATION_START_GEN:
-            imitation_bonus = _imitation_bonus_from_samples(act, _IMITATION_SAMPLES)
+            imitation_bonus = _imitation_bonus_from_samples(
+                act, _IMITATION_SAMPLES, _IMITATION_HUMAN_FREQ
+            )
         return idx, fitness, env_stats, imitation_bonus
     except Exception:
-        # Ritorna fitness molto negativa per non bloccare il training
-        return idx, -10000.0, {
-            'score': 0, 'frame_count': 0, 'level': 1,
-            'lives_lost': 0, 'powerups': 0, 'missiles': 0,
-            'upgrades': 0, 'idle_frames': 0, 'enemies_killed': 0,
-            'dodges': 0, 'accuracy': 0, 'near_misses': 0,
-            'comp_kills': 0, 'comp_dodges': 0,
-            'comp_accuracy': 0, 'comp_frames': 0, 'comp_lives': 0,
-            'comp_level': 0, 'comp_powerups': 0, 'comp_missiles': 0,
-            'comp_upgrades': 0, 'comp_shield': 0, 'comp_idle': 0,
-            'comp_near_misses': 0, 'comp_pu_approach': 0,
-        }, 0.0
+        # Fitness molto negativa per non bloccare il training, ma con traccia
+        # in console: un errore sistematico deve essere visibile
+        print(f"[worker] valutazione del genoma {getattr(genome, 'key', '?')} "
+              f"fallita:\n{traceback.format_exc()}", flush=True)
+        return idx, -10000.0, _empty_env_stats(), 0.0
+
+
+def _validation_worker(args):
+    """Un episodio della suite di validazione (top-level per il Pool).
+
+    Restituisce (key, seed, fitness, env_stats); fitness None se la
+    valutazione fallisce (genoma incompatibile).
+    """
+    key, genome, config, seed, max_frames = args
+    try:
+        act = compile_network(genome, config)
+        fitness, env_stats = _run_episode(act, seed, max_frames)
+        return key, seed, fitness, env_stats
+    except Exception:
+        print(f"[validazione] genoma {key}, seed {seed} fallito:\n"
+              f"{traceback.format_exc()}", flush=True)
+        return key, seed, None, None
+
+
+def _list_checkpoints(prefix=None):
+    """Checkpoint su disco come lista ordinata di (generazione, path).
+
+    Ignora i file con suffisso non numerico (es. neat-checkpoint-80.bak o il
+    temporaneo di scrittura neat-checkpoint-tmp).
+    """
+    prefix = prefix or CHECKPOINT_PREFIX
+    base = os.path.basename(prefix)
+    found = []
+    for path in glob.glob(glob.escape(prefix) + "*"):
+        suffix = os.path.basename(path)[len(base):]
+        if suffix.isdigit():
+            found.append((int(suffix), path))
+    found.sort()
+    return found
 
 
 class _RollingCheckpointer(neat.Checkpointer):
-    """Checkpointer che mantiene solo gli ultimi MAX_CHECKPOINTS file."""
+    """Checkpointer atomico che mantiene solo gli ultimi MAX_CHECKPOINTS file."""
 
     def save_checkpoint(self, config, population, species_set, generation):
-        super().save_checkpoint(config, population, species_set, generation)
-        self._cleanup_old_checkpoints()
+        """Stesso contenuto e formato di neat.Checkpointer.save_checkpoint
+        (neat-python 1.1.0, letto da restore_checkpoint), ma scritto su un file
+        temporaneo e poi rinominato: un'interruzione durante la scrittura non
+        lascia un checkpoint troncato con il numero piu' alto.
+        """
+        filename = f'{self.filename_prefix}{generation}'
+        tmp = f'{self.filename_prefix}tmp'
+        print(f"Saving checkpoint to {filename}")
+        with gzip.open(tmp, 'w', compresslevel=5) as f:
+            data = (generation, config, population, species_set, random.getstate())
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, filename)
+        self._cleanup_old_checkpoints(self.filename_prefix, generation)
 
     @staticmethod
-    def _cleanup_old_checkpoints():
-        pattern = CHECKPOINT_PREFIX + "*"
-        files = glob.glob(pattern)
+    def _cleanup_old_checkpoints(prefix=None, saved_generation=None):
+        """Tiene gli ultimi MAX_CHECKPOINTS fino a quello appena salvato.
+
+        I file con numero piu' alto (illeggibili, saltati alla ripresa) non
+        contano: altrimenti la rotazione cancellerebbe checkpoint validi.
+        """
+        files = _list_checkpoints(prefix)
+        if saved_generation is not None:
+            files = [(g, p) for g, p in files if g <= saved_generation]
         if len(files) <= MAX_CHECKPOINTS:
             return
-        files.sort(key=lambda f: int(f.split("-")[-1]))
-        for old in files[:-MAX_CHECKPOINTS]:
+        for _, old in files[:-MAX_CHECKPOINTS]:
             try:
                 os.remove(old)
             except OSError:
@@ -307,11 +504,16 @@ class NeatTrainer:
             CONFIG_PATH,
         )
         self.best_genome = None
-        self.best_fitness = -1
+        # Record di validazione: media della suite (VALIDATION_SEEDS) del
+        # genoma in best_genome.pkl, -inf se non ancora stabilito
+        self.best_fitness = -math.inf
         self.generation = 0
-        # Imitation bonus: campioni (obs, azione umana, peso) dalle ultime
-        # 5 sessioni umane, caricati una volta in train() prima del Pool
+        self._start_generation = 0  # generazione di partenza della sessione
+        # Imitation bonus: campioni (obs, azione umana, peso) dalle sessioni
+        # umane con lo score piu' alto e frequenze delle azioni umane,
+        # caricati una volta in train() prima del Pool
         self._imitation_samples = None
+        self._imitation_human_freq = None
         self._human_sessions_count = None  # None = sessioni non ancora caricate
         self._headless = False
         self._font = None
@@ -321,10 +523,13 @@ class NeatTrainer:
         # Riferimenti NEAT (set in train())
         self._population = None
         self._stats_reporter = None
+        self._checkpointer = None
         # Statistiche per schermata headless
         self._last_gen_stats = None
         self._current_gen_fitnesses = []
         self._training_start_time = None
+        self._gen_total = 0             # genomi della generazione corrente
+        self._genomes_evaluated = 0     # genomi valutati in questa sessione
         # Storico generazioni
         self._fitness_history = []       # list of (avg, best, stdev)
         self._species_count_history = []
@@ -339,10 +544,18 @@ class NeatTrainer:
         self._current_gen_missiles = []
         self._current_gen_upgrades = []
         self._current_gen_idle_frames = []
-        # Scomposizione fitness miglior genoma
+        # Scomposizione fitness: genoma record (medie sulla suite di
+        # validazione) e genomi della gen corrente (stesso ordine di
+        # _current_gen_fitnesses)
         self._best_genome_components = None
         self._current_gen_fitness_components = []
         self._new_record_this_gen = False
+        # Validazione: cache per genome.key (media, componenti medi, fitness
+        # per seed), valida per tutta la sessione (suite e fitness non
+        # cambiano), e progresso
+        self._val_cache = {}
+        self._last_validation = None    # (key, media) del migliore della gen
+        self._validation_progress = None
         self._pool = None
 
     def _init_fonts(self):
@@ -362,39 +575,49 @@ class NeatTrainer:
         self._training_start_time = time.time()
         self._init_fonts()
 
-        # In headless: popolazione piu' grande per piu' diversita'
+        # In headless: popolazione piu' grande per piu' diversita'. Va
+        # impostata prima del restore, che riparte da self.config
         if headless:
-            self.config.pop_size = 300
+            self.config.pop_size = HEADLESS_POP_SIZE
+        # Versione della fitness, salvata nei checkpoint con la config
+        self.config.fitness_version = FITNESS_VERSION
 
         # Cerca checkpoint per riprendere
-        checkpoint = self._find_latest_checkpoint()
+        checkpoint, saved_config = self._find_latest_checkpoint()
         if checkpoint:
             print(f"Ripresa dal checkpoint: {checkpoint}")
-            p = neat.Checkpointer.restore_checkpoint(checkpoint)
-            # Applica pop_size anche al checkpoint ripristinato
-            if headless:
-                p.config.pop_size = 300
+            # Il compatibility threshold e' stato del controllo di speciazione
+            # (_check_and_fix_stagnation), non un iperparametro: si riprende il
+            # valore adattato nel checkpoint, quello del file vale per un run nuovo
+            threshold = saved_config.species_set_config.compatibility_threshold
+            self.config.species_set_config.compatibility_threshold = threshold
+            # new_config: pop_size, mutazioni, stagnazione e riproduzione da
+            # neat_config.txt (senza, neat usa la config pickled nel checkpoint)
+            p = neat.Checkpointer.restore_checkpoint(checkpoint, new_config=self.config)
+            # Lo species set ripristinato ha ancora la species_set_config del
+            # pickle: senza questo il threshold non agirebbe sulla speciazione
+            p.species.species_set_config = p.config.species_set_config
             # Sincronizza generazione interna con il checkpoint
             self.generation = p.generation
-            print(f"  Generazione ripristinata: {self.generation}")
+            print(f"  Generazione ripristinata: {self.generation}, "
+                  f"pop_size {p.config.pop_size}, threshold {threshold:.3f}")
+            saved_version = getattr(saved_config, 'fitness_version', 1)
+            if saved_version != FITNESS_VERSION:
+                self._reset_species_history(p, saved_version)
         else:
             print(f"Inizio nuovo training (pop_size={self.config.pop_size})")
             p = neat.Population(self.config)
-
-        # Carica miglior genoma precedente se esiste
-        if os.path.exists(BEST_GENOME_PATH):
-            with open(BEST_GENOME_PATH, 'rb') as f:
-                self.best_genome = pickle.load(f)
-                self.best_fitness = self.best_genome.fitness or 0
+        self._start_generation = self.generation
 
         # Reporter
         p.add_reporter(neat.StdOutReporter(True))
         stats = neat.StatisticsReporter()
         p.add_reporter(stats)
-        p.add_reporter(_RollingCheckpointer(
+        self._checkpointer = _RollingCheckpointer(
             generation_interval=10,
             filename_prefix=CHECKPOINT_PREFIX,
-        ))
+        )
+        p.add_reporter(self._checkpointer)
 
         self._population = p
         self._stats_reporter = stats
@@ -408,13 +631,19 @@ class NeatTrainer:
             num_workers = max(1, multiprocessing.cpu_count() - 1)
             self._pool = multiprocessing.Pool(
                 processes=num_workers, initializer=_init_worker,
-                initargs=(self._imitation_samples,),
+                initargs=(self._imitation_samples, self._imitation_human_freq),
             )
 
         try:
+            # Record di validazione di best_genome.pkl (sidecar o rivalutazione)
+            self._init_validation_record(p.config)
             p.run(self._eval_genomes, generations)
         except _TrainingInterrupted:
             print("\nTraining interrotto dall'utente.")
+            self._save_interrupt_checkpoint(p)
+        except KeyboardInterrupt:
+            self._save_interrupt_checkpoint(p)
+            raise
         finally:
             if self._pool:
                 self._pool.terminate()
@@ -422,13 +651,47 @@ class NeatTrainer:
                 self._pool = None
 
         # Il miglior genoma e' gia' salvato incrementalmente in _eval_genomes
-        if self.best_genome:
-            print(f"\nMiglior fitness raggiunta: {self.best_fitness:.1f}")
+        if self.best_genome and self.best_fitness > -math.inf:
+            print(f"\nRecord di validazione: {self.best_fitness:.1f}")
+
+    @staticmethod
+    def _reset_species_history(p, saved_version):
+        """Azzera lo storico di fitness delle specie dopo un cambio di fitness.
+
+        DefaultStagnation considera migliorata una specie solo se supera il
+        massimo del suo storico: con lo storico nella vecchia scala nessuna
+        specie migliorerebbe e dopo max_stagnation generazioni verrebbero
+        eliminate tutte tranne le species_elitism protette.
+        """
+        for s in p.species.species.values():
+            s.fitness_history = []
+            s.last_improved = p.generation
+            s.fitness = None
+            s.adjusted_fitness = None
+        print(f"  Fitness del checkpoint v{saved_version}, attuale v{FITNESS_VERSION}: "
+              f"storico di {len(p.species.species)} specie azzerato")
+
+    def _save_interrupt_checkpoint(self, p):
+        """Checkpoint all'interruzione (ESC, chiusura, Ctrl+C).
+
+        Salva la popolazione della generazione in corso, prima della sua
+        valutazione (lo stesso stato del checkpoint periodico con quel
+        numero). Solo se in questa sessione e' stata completata almeno una
+        generazione: altrimenti lo stato coincide con il checkpoint ripreso.
+        """
+        if self._checkpointer is None or p.generation <= self._start_generation:
+            return
+        try:
+            self._checkpointer.save_checkpoint(p.config, p.population, p.species, p.generation)
+        except Exception as e:
+            print(f"Checkpoint di interruzione non salvato: {e!r}")
 
     def _eval_genomes(self, genomes, config):
         """Valuta tutti i genomi della popolazione.
 
-        In modalita' headless usa multiprocessing per parallelizzare.
+        In modalita' headless usa multiprocessing per parallelizzare. Ogni
+        genoma gioca un episodio per seed della generazione (gli stessi per
+        tutti); a fine generazione i migliori passano dalla validazione.
         """
         # Sessioni umane (di norma gia' caricate in train())
         if self._human_sessions_count is None:
@@ -436,10 +699,8 @@ class NeatTrainer:
 
         self._gen_start_time = time.time()
 
-        best_in_gen = None
-        best_in_gen_idx = 0
-        best_fitness_in_gen = -float('inf')
         total = len(genomes)
+        self._gen_total = total
         render = self.screen is not None and not self._headless
 
         # Reset liste per gen corrente
@@ -453,14 +714,15 @@ class NeatTrainer:
         self._current_gen_upgrades = []
         self._current_gen_idle_frames = []
         self._current_gen_fitness_components = []
+        game_fitness = {}  # idx -> fitness di gioco (senza imitation)
 
         max_frames = self._get_max_frames()
+        seeds = _generation_seeds(self.generation)
 
         if self._headless:
             # ── Valutazione PARALLELA (headless, pool persistente) ──
             worker_args = [
-                (idx, genome_id, genome, config, max_frames, self.generation,
-                 genome_id + self.generation * 10000)
+                (idx, genome, config, max_frames, self.generation, seeds)
                 for idx, (genome_id, genome) in enumerate(genomes)
             ]
 
@@ -472,46 +734,35 @@ class NeatTrainer:
             ):
                 genome_id, genome = genomes[idx]
                 genome.fitness = fitness
+                game_fitness[idx] = fitness
                 self._collect_stats(genome, env_stats, imitation_bonus)
-
-                if genome.fitness > best_fitness_in_gen:
-                    best_fitness_in_gen = genome.fitness
-                    best_in_gen = genome
-                    best_in_gen_idx = idx
 
                 completed += 1
                 # Aggiorna dashboard durante la valutazione
                 if self.screen and completed % 5 == 0:
                     self._draw_stats_screen(completed, total, config)
                     pygame.display.flip()
-                    for event in pygame.event.get():
-                        if event.type == pygame.QUIT:
-                            raise _TrainingInterrupted()
-                        elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                            raise _TrainingInterrupted()
+                    self._poll_interrupt()
 
             # Aggiorna schermata finale
             if self.screen:
                 self._draw_stats_screen(total, total, config)
                 pygame.display.flip()
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        raise _TrainingInterrupted()
-                    elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                        raise _TrainingInterrupted()
+                self._poll_interrupt()
         else:
             # ── Valutazione SERIALE (con rendering) ──
             for idx, (genome_id, genome) in enumerate(genomes):
                 fitness, env_stats = self._eval_single(
-                    genome, config, idx + 1, total, render
+                    genome, config, idx + 1, total, render, seeds, max_frames
                 )
                 genome.fitness = fitness
+                game_fitness[idx] = fitness
                 self._collect_stats(genome, env_stats)
 
-                if genome.fitness > best_fitness_in_gen:
-                    best_fitness_in_gen = genome.fitness
-                    best_in_gen = genome
-                    best_in_gen_idx = idx
+        best_fitness_in_gen = max(self._current_gen_fitnesses) if self._current_gen_fitnesses else 0.0
+
+        # Validazione dei migliori: salva best_genome.pkl se batte il record
+        self._new_record_this_gen = self._validate_top_genomes(genomes, game_fitness, config)
 
         # Statistiche fine generazione
         n = max(1, len(self._current_gen_fitnesses))
@@ -542,21 +793,9 @@ class NeatTrainer:
             'gen_time': gen_time,
         }
 
-        # Salva il miglior genoma se migliore del record
-        new_record = False
-        if best_in_gen and best_fitness_in_gen > self.best_fitness:
-            self.best_fitness = best_fitness_in_gen
-            self.best_genome = best_in_gen
-            self._best_genome_components = self._current_gen_fitness_components[best_in_gen_idx]
-            new_record = True
-            os.makedirs(AI_DIR, exist_ok=True)
-            with open(BEST_GENOME_PATH, 'wb') as f:
-                pickle.dump(best_in_gen, f)
-
-        self._new_record_this_gen = new_record
         self.generation += 1
 
-        # Check anti-stagnazione automatico
+        # Controllo speciazione (threshold adattivo)
         self._check_and_fix_stagnation(config)
 
         # In headless: aggiorna schermata fine generazione
@@ -564,9 +803,168 @@ class NeatTrainer:
             self._draw_stats_screen(total, total, config)
             pygame.display.flip()
 
+    def _poll_interrupt(self):
+        """Svuota la coda eventi: ESC o chiusura finestra interrompono il training."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                raise _TrainingInterrupted()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                raise _TrainingInterrupted()
+
+    # ── Validazione e persistenza del best ──
+
+    def _validate_top_genomes(self, genomes, game_fitness, config):
+        """Rivaluta i VALIDATION_TOP_K genomi con la fitness di gioco piu' alta
+        sulla suite di validazione e salva il migliore se batte il record.
+
+        I genomi gia' validati in questa sessione (elite riportate identiche
+        alla generazione dopo) escono dalla cache. Ritorna True se nuovo record.
+        """
+        if not game_fitness:
+            return False
+        ranked = sorted(game_fitness, key=lambda i: game_fitness[i], reverse=True)
+        candidates = [genomes[i][1] for i in ranked[:VALIDATION_TOP_K]]
+        todo = [g for g in candidates if g.key not in self._val_cache]
+        if todo:
+            self._val_cache.update(self._run_validation(todo, config))
+        best = max(candidates, key=lambda g: self._val_cache[g.key][0])
+        mean, comps, per_seed = self._val_cache[best.key]
+        self._last_validation = (best.key, mean)
+        print(f"  [Validazione] top-{len(candidates)} ({len(todo)} nuovi): migliore genoma "
+              f"{best.key}, media {mean:.1f} su {len(VALIDATION_SEEDS)} seed "
+              f"(record {self.best_fitness:.1f})")
+        if mean <= self.best_fitness:
+            return False
+        self.best_fitness = mean
+        self.best_genome = best
+        self._best_genome_components = comps
+        self._save_best_genome(best, mean, per_seed)
+        return True
+
+    def _run_validation(self, genomes, config):
+        """Gioca la suite di validazione per ogni genoma.
+
+        In headless usa il Pool (un task per genoma e seed), nel visuale gira
+        nel processo principale senza rendering. Ritorna {key: (media,
+        componenti medi, [fitness per seed in ordine di seed])}; media -inf se
+        un episodio fallisce (genoma incompatibile).
+        """
+        max_frames = MAX_FRAMES_PER_EPISODE
+        tasks = [(g.key, g, config, seed, max_frames) for g in genomes for seed in VALIDATION_SEEDS]
+        per_key = {g.key: {} for g in genomes}
+        if self._pool is not None:
+            results = self._pool.imap_unordered(_validation_worker, tasks, chunksize=1)
+        else:
+            results = (_validation_worker(t) for t in tasks)
+        done = 0
+        try:
+            for key, seed, fitness, env_stats in results:
+                per_key[key][seed] = (fitness, env_stats)
+                done += 1
+                self._validation_progress = (done, len(tasks))
+                if self.screen is not None:
+                    if self._headless:
+                        self._draw_stats_screen(self._gen_total, self._gen_total, config)
+                    else:
+                        self._draw_validation_overlay(done, len(tasks))
+                    pygame.display.flip()
+                    self._poll_interrupt()
+        finally:
+            self._validation_progress = None
+
+        out = {}
+        for key, by_seed in per_key.items():
+            # In ordine di seed: la media non dipende dall'ordine di arrivo
+            ordered = [by_seed[s] for s in VALIDATION_SEEDS]
+            fits = [f for f, _ in ordered]
+            if any(f is None for f in fits):
+                out[key] = (-math.inf, None, fits)
+            else:
+                out[key] = (sum(fits) / len(fits), _mean_stats([s for _, s in ordered]), fits)
+        return out
+
+    def _init_validation_record(self, config):
+        """Fissa il record di validazione all'avvio.
+
+        Legge BEST_GENOME_META_PATH. Se manca, e' illeggibile, si riferisce a
+        un altro genoma o a un'altra versione della fitness/suite, rivaluta
+        best_genome.pkl con la suite corrente e riscrive il sidecar (il pkl non
+        cambia). Senza best_genome.pkl caricabile il record resta -inf e il
+        primo genoma validato viene salvato.
+        """
+        self.best_fitness = -math.inf
+        if not os.path.exists(BEST_GENOME_PATH):
+            return
+        try:
+            with open(BEST_GENOME_PATH, 'rb') as f:
+                self.best_genome = pickle.load(f)
+        except Exception as e:
+            print(f"best_genome.pkl non caricabile, record azzerato: {e!r}")
+            self.best_genome = None
+            return
+
+        meta = self._read_best_meta()
+        if meta is not None:
+            self.best_fitness = float(meta['validation_mean'])
+            print(f"Record di validazione: {self.best_fitness:.1f} ({BEST_GENOME_META_PATH})")
+            return
+
+        print("Rivalutazione di best_genome.pkl sulla suite di validazione "
+              f"({len(VALIDATION_SEEDS)} seed, fitness v{FITNESS_VERSION})...")
+        mean, comps, per_seed = self._run_validation([self.best_genome], config)[self.best_genome.key]
+        if mean == -math.inf:
+            print("  best_genome.pkl non valutabile: record azzerato")
+            return
+        self.best_fitness = mean
+        self._best_genome_components = comps
+        print(f"  Record di validazione: {mean:.1f}")
+        self._write_best_meta(self.best_genome, mean, per_seed)
+
+    def _read_best_meta(self):
+        """Sidecar del best se valido per il genoma e la suite correnti, altrimenti None."""
+        try:
+            with open(BEST_GENOME_META_PATH, encoding='utf-8') as f:
+                meta = json.load(f)
+            float(meta['validation_mean'])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if (meta.get('fitness_version') != FITNESS_VERSION
+                or meta.get('validation_seeds') != list(VALIDATION_SEEDS)
+                or meta.get('max_frames') != MAX_FRAMES_PER_EPISODE
+                or meta.get('genome_key') != getattr(self.best_genome, 'key', None)):
+            return None
+        return meta
+
+    def _write_best_meta(self, genome, mean, per_seed):
+        """Scrive il sidecar del best (JSON, atomico: .tmp + os.replace)."""
+        meta = {
+            'fitness_version': FITNESS_VERSION,
+            'validation_mean': mean,
+            'validation_seeds': list(VALIDATION_SEEDS),
+            'validation_fitness': per_seed,
+            'max_frames': MAX_FRAMES_PER_EPISODE,
+            'genome_key': genome.key,
+            'generation': self.generation,
+            'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+        }
+        os.makedirs(os.path.dirname(BEST_GENOME_META_PATH), exist_ok=True)
+        tmp = BEST_GENOME_META_PATH + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(meta, f, indent=1)
+        os.replace(tmp, BEST_GENOME_META_PATH)
+
+    def _save_best_genome(self, genome, mean, per_seed):
+        """Salva best_genome.pkl (stesso formato: il genoma pickled) e il sidecar."""
+        os.makedirs(AI_DIR, exist_ok=True)
+        tmp = BEST_GENOME_PATH + '.tmp'
+        with open(tmp, 'wb') as f:
+            pickle.dump(genome, f)
+        os.replace(tmp, BEST_GENOME_PATH)
+        self._write_best_meta(genome, mean, per_seed)
+
     def _get_max_frames(self):
         """Frame massimi adattivi: piu' generazioni = piu' tempo concesso."""
-        # Cresce da MIN a MAX in 50 generazioni
+        # Cresce da MIN a MAX (30 s -> 3 min di gioco) in 50 generazioni
         t = min(1.0, self.generation / 50.0)
         return int(MIN_FRAMES_PER_EPISODE + t * (MAX_FRAMES_PER_EPISODE - MIN_FRAMES_PER_EPISODE))
 
@@ -575,11 +973,16 @@ class NeatTrainer:
 
         Applica anche l'imitation bonus se disponibile: in headless arriva
         gia' calcolato dal worker, nel training visuale viene calcolato qui.
+        Il bonus entra nei componenti come 'comp_imitation'.
         """
+        bonus = 0.0
         if self._imitation_samples is not None and self.generation >= IMITATION_START_GEN:
             if imitation_bonus is None:
                 imitation_bonus = self._imitation_bonus(genome, self.config)
-            genome.fitness += imitation_bonus
+            bonus = imitation_bonus
+            genome.fitness += bonus
+        env_stats = dict(env_stats, comp_imitation=bonus)
+        self._genomes_evaluated += 1
         self._current_gen_fitnesses.append(genome.fitness)
         self._current_gen_scores.append(env_stats['score'])
         self._current_gen_levels.append(env_stats['level'])
@@ -591,65 +994,68 @@ class NeatTrainer:
         self._current_gen_idle_frames.append(env_stats['idle_frames'])
         self._current_gen_fitness_components.append(env_stats)
 
-    def _eval_single(self, genome, config, genome_num=0, total=0, render=False):
-        """Valuta un singolo genoma giocando una partita.
+    def _eval_single(self, genome, config, genome_num=0, total=0, render=False,
+                     seeds=None, max_frames=None):
+        """Valuta un genoma giocando un episodio per seed (media come il worker).
 
-        Se render=True, mostra la partita sullo schermo in tempo reale.
+        Se render=True, mostra le partite sullo schermo in tempo reale.
+        Stesse regole del worker (_run_episode): early stop con _early_stop.
         """
         act = compile_network(genome, config)
-        env = GameEnv(render=render, screen=self.screen)
-        seed = (genome.key if hasattr(genome, 'key') else id(genome)) + self.generation * 10000
-        obs = env.reset(seed=seed)
-        max_frames = self._get_max_frames()
+        if seeds is None:
+            seeds = _generation_seeds(self.generation)
+        if max_frames is None:
+            max_frames = self._get_max_frames()
+        results = []
+        for ep, seed in enumerate(seeds):
+            env = GameEnv(render=render, screen=self.screen)
+            obs = env.reset(seed=seed)
 
-        for frame in range(max_frames):
-            # Gestione eventi (ESC per interrompere)
-            if render:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        env.close()
-                        raise _TrainingInterrupted()
-                    elif event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_ESCAPE:
+            for frame in range(max_frames):
+                # Gestione eventi (ESC per interrompere)
+                if render:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT:
                             env.close()
                             raise _TrainingInterrupted()
+                        elif event.type == pygame.KEYDOWN:
+                            if event.key == pygame.K_ESCAPE:
+                                env.close()
+                                raise _TrainingInterrupted()
 
-            output = act(obs)
-            actions = self._decode_actions(output)
-            # Disegna solo i frame che verranno mostrati (1 su TRAIN_RENDER_SKIP):
-            # lo sfondo avanza comunque in _update, quindi l'immagine non cambia
-            obs, reward, done = env.step(
-                actions, draw=render and frame % TRAIN_RENDER_SKIP == 0
-            )
-
-            # Terminazione anticipata: genoma scarso (check periodico)
-            if (frame >= EARLY_STOP_MIN_FRAME
-                    and frame % EARLY_STOP_INTERVAL == 0):
-                # Nelle prime 10 generazioni, non terminare per vite perse
-                # (i genomi iniziali sono tutti terribili, servono dati)
-                max_lives = EARLY_STOP_MAX_LIVES_LOST if self.generation >= 10 else PLAYER_LIVES
-                if env.lives_lost >= max_lives:
-                    break
-                # Troppo inattivo (sta fermo e basta)
-                if env.idle_frames / max(1, frame) >= EARLY_STOP_IDLE_RATIO:
-                    break
-
-            # Rendering: mostra 1 frame su TRAIN_RENDER_SKIP
-            if render and frame % TRAIN_RENDER_SKIP == 0:
-                self._draw_training_overlay(
-                    env, genome_num, total, frame
+                output = act(obs)
+                actions = self._decode_actions(output)
+                # Disegna solo i frame che verranno mostrati (1 su TRAIN_RENDER_SKIP):
+                # lo sfondo avanza comunque in _update, quindi l'immagine non cambia
+                obs, reward, done = env.step(
+                    actions, draw=render and frame % TRAIN_RENDER_SKIP == 0
                 )
-                pygame.display.flip()
 
-            if done:
-                break
+                # Rendering: mostra 1 frame su TRAIN_RENDER_SKIP
+                if render and frame % TRAIN_RENDER_SKIP == 0:
+                    self._draw_training_overlay(
+                        env, genome_num, total, frame, ep + 1, len(seeds)
+                    )
+                    pygame.display.flip()
 
-        fitness, env_stats = _compute_fitness(env)
-        env.close()
-        return fitness, env_stats
+                # Game over o terminazione anticipata (genoma scarso)
+                if done or _early_stop(env, frame, self.generation):
+                    break
+
+            results.append(_compute_fitness(env))
+            env.close()
+
+        fitness = sum(f for f, _ in results) / len(results)
+        return fitness, _mean_stats([s for _, s in results])
 
     def _check_and_fix_stagnation(self, config):
-        """Rileva stagnazione e interviene automaticamente."""
+        """Controllo della speciazione: adatta il compatibility threshold.
+
+        Agisce sulla speciazione della generazione successiva perche' lo
+        species set usa config.species_set_config (anche dopo il restore, vedi
+        train()). La stagnazione delle specie la gestisce neat
+        (DefaultStagnation: max_stagnation, species_elitism).
+        """
         if not self._population:
             return
 
@@ -670,70 +1076,7 @@ class NeatTrainer:
             config.species_set_config.compatibility_threshold = new_t
             print(f"  [Anti-stagnazione] Troppe specie ({num_species}), threshold alzato: {threshold:.2f} -> {new_t:.2f}")
 
-        # Se BEST fitness non migliora da 20 gen: inietta diversita'
-        if len(self._fitness_history) >= 20:
-            recent_bests = [h[1] for h in self._fitness_history[-20:]]
-            improvement = max(recent_bests) - min(recent_bests)
-            pct = improvement / max(1, abs(recent_bests[0])) * 100
-            if pct < 3:  # meno del 3% di miglioramento in 20 gen
-                self._inject_fresh_genomes(config)
-
-        # Boost mutazione se stagnazione profonda (50+ gen senza miglioramento)
-        if len(self._fitness_history) >= 50:
-            recent_bests = [h[1] for h in self._fitness_history[-50:]]
-            improvement = max(recent_bests) - min(recent_bests)
-            pct = improvement / max(1, abs(recent_bests[0])) * 100
-            if pct < 5:
-                self._inject_fresh_genomes(config, aggressive=True)
-                print(f"  [Anti-stagnazione] Stagnazione profonda! Iniezione aggressiva.")
-
-    def _inject_fresh_genomes(self, config, aggressive=False):
-        """Sostituisce genomi peggiori con mix di freschi e mutati dal best."""
-        pop = self._population.population
-        pct = 0.25 if aggressive else 0.15
-        num_replace = max(10, int(len(pop) * pct))
-
-        sorted_genomes = sorted(
-            pop.items(), key=lambda x: x[1].fitness or -float('inf')
-        )
-        for gid, _ in sorted_genomes[:num_replace]:
-            del pop[gid]
-
-        new_id = max(pop.keys()) + 1
-        num_fresh = num_replace // 2  # meta' completamente nuovi
-        num_mutated = num_replace - num_fresh  # meta' mutati dal best
-
-        # Genomi freschi random
-        for i in range(num_fresh):
-            g = config.genome_type(new_id + i)
-            g.configure_new(config.genome_config)
-            pop[new_id + i] = g
-
-        # Genomi mutati dal miglior genoma (se esiste)
-        if self.best_genome:
-            import copy
-            for i in range(num_mutated):
-                gid = new_id + num_fresh + i
-                g = copy.deepcopy(self.best_genome)
-                g.key = gid
-                # Muta pesantemente
-                g.mutate(config.genome_config)
-                g.mutate(config.genome_config)  # doppia mutazione
-                if aggressive:
-                    g.mutate(config.genome_config)  # tripla se aggressivo
-                g.fitness = None
-                pop[gid] = g
-        else:
-            # Se non c'e' best, tutti freschi
-            for i in range(num_mutated):
-                gid = new_id + num_fresh + i
-                g = config.genome_type(gid)
-                g.configure_new(config.genome_config)
-                pop[gid] = g
-
-        print(f"  [Anti-stagnazione] Iniettati {num_fresh} freschi + {num_mutated} mutati dal best")
-
-    def _draw_training_overlay(self, env, genome_num, total, frame):
+    def _draw_training_overlay(self, env, genome_num, total, frame, episode=1, episodes=1):
         """Disegna l'overlay con info training sopra il gioco."""
         overlay_bg = pygame.Surface((SCREEN_WIDTH, 50), pygame.SRCALPHA)
         overlay_bg.fill((0, 0, 0, 160))
@@ -745,8 +1088,8 @@ class NeatTrainer:
 
         top_text = self._font.render(
             f"Gen {self.generation + 1} | "
-            f"Genoma {genome_num}/{total} | "
-            f"Record: {self.best_fitness:.0f}"
+            f"Genoma {genome_num}/{total} (ep. {episode}/{episodes}) | "
+            f"Record val.: {self._format_record()}"
             f"{imitation}",
             True, (255, 255, 0)
         )
@@ -766,6 +1109,20 @@ class NeatTrainer:
             True, (180, 220, 180)
         )
         self.screen.blit(bottom_text, (10, SCREEN_HEIGHT - 26))
+
+    def _draw_validation_overlay(self, done, total):
+        """Training visuale: avanzamento della validazione (senza rendering)."""
+        self.screen.fill((10, 10, 30))
+        text = self._font.render(
+            f"Gen {self.generation + 1} | Validazione dei migliori: episodio {done}/{total} | "
+            f"Record val.: {self._format_record()}",
+            True, (255, 255, 0)
+        )
+        self.screen.blit(text, text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)))
+
+    def _format_record(self):
+        """Record di validazione per HUD e dashboard ('n/d' se non ancora fissato)."""
+        return "n/d" if self.best_fitness == -math.inf else f"{self.best_fitness:.0f}"
 
     # ── Dashboard headless: orchestratore ──
 
@@ -839,6 +1196,12 @@ class NeatTrainer:
         self.screen.blit(pct, (bar_x + bar_w + 8, y))
         y += 20
 
+        # Validazione dei migliori a fine generazione (o all'avvio)
+        if self._validation_progress:
+            done, n = self._validation_progress
+            self._draw_kv(x, y, "Validazione:", f"episodio {done}/{n}", (255, 200, 100))
+            y += 20
+
         return y + 6
 
     # ── Sezione B: Fitness ──
@@ -846,12 +1209,15 @@ class NeatTrainer:
     def _draw_section_fitness(self, x, y):
         y = self._draw_section_header("FITNESS", x, y)
 
-        # Record
+        # Record di validazione (media sulla suite, senza imitation) e
+        # migliore validato dell'ultima generazione
         record_color = (100, 255, 100)
-        record_text = f"{self.best_fitness:.0f}"
-        if hasattr(self, '_new_record_this_gen') and self._new_record_this_gen:
+        record_text = self._format_record()
+        if self._new_record_this_gen:
             record_text += "  *NUOVO*"
-        self._draw_kv(x, y, "Record:", record_text, record_color)
+        elif self._last_validation:
+            record_text += f"  (ultima gen {self._last_validation[1]:.0f})"
+        self._draw_kv(x, y, "Record val.:", record_text, record_color)
         y += 20
 
         # Gen corrente (compatta: avg / best / stdev su 2 righe)
@@ -920,8 +1286,12 @@ class NeatTrainer:
         self.screen.blit(src, (x, y))
         y += 18
 
+        # Tutti i componenti della fitness (imitation compreso): TOTALE e'
+        # la fitness del genoma (per il record: media di validazione)
         items = [
             ("Kills",      comp.get('comp_kills', 0),               (120, 255, 120)),
+            ("Kill miss.", comp.get('comp_missile_kills', 0),       (255, 180, 80)),
+            ("Kill bomba", comp.get('comp_bomb_kills', 0),          (200, 80, 255)),
             ("Schivate",   comp.get('comp_dodges', 0),              (100, 220, 180)),
             ("Near-miss",  comp.get('comp_near_misses', 0),         (100, 255, 200)),
             ("Precisione", comp.get('comp_accuracy', 0),            (180, 255, 100)),
@@ -934,6 +1304,8 @@ class NeatTrainer:
             ("Vite",       comp['comp_lives'],                      (255, 80, 80)),
             ("Scudo",      comp['comp_shield'],                     (255, 120, 50)),
             ("Idle",       comp['comp_idle'],                       (200, 150, 100)),
+            ("Sparo",      comp.get('comp_shoot_penalty', 0),       (180, 160, 120)),
+            ("Imitation",  comp.get('comp_imitation', 0),           (255, 200, 200)),
         ]
 
         max_abs = max(abs(v) for _, v, _ in items) if items else 1
@@ -1026,12 +1398,14 @@ class NeatTrainer:
     def _draw_section_efficiency(self, x, y, genome_num, config):
         y = self._draw_section_header("EFFICIENZA", x, y)
 
-        # Tempo totale + gen/min su una riga
+        # Tempo totale + gen/min su una riga (generazioni di questa sessione:
+        # dopo un resume self.generation parte dal checkpoint)
         if self._training_start_time:
             elapsed = time.time() - self._training_start_time
             eff_text = self._format_time(elapsed)
-            if self.generation > 0:
-                eff_text += f"  |  {self.generation / (elapsed / 60.0):.1f} gen/min"
+            gens_done = self.generation - self._start_generation
+            if gens_done > 0:
+                eff_text += f"  |  {gens_done / (elapsed / 60.0):.2f} gen/min"
             self._draw_kv(x, y, "Tempo:", eff_text, (200, 200, 100))
             y += 20
 
@@ -1043,10 +1417,8 @@ class NeatTrainer:
             self._draw_kv(x, y, "Tempo/gen:", f"avg {avg_t:.1f}s  last {last_t:.1f}s", t_color)
             y += 20
 
-        # Genomi totali
-        pop = config.pop_size if config else 100
-        total_genomes = self.generation * pop + genome_num
-        self._draw_kv(x, y, "Genomi valutati:", str(total_genomes), (180, 180, 200))
+        # Genomi valutati in questa sessione
+        self._draw_kv(x, y, "Genomi valutati:", str(self._genomes_evaluated), (180, 180, 200))
         y += 20
 
         return y + 6
@@ -1184,47 +1556,27 @@ class NeatTrainer:
         """Bonus fitness per somiglianza alle azioni umane registrate.
 
         Calcolato nel main solo dal training visuale: in headless lo calcola
-        il worker (_eval_genome_worker) con gli stessi campioni.
+        il worker (_eval_genome_worker) con gli stessi campioni e frequenze.
         """
         if self._imitation_samples is None:
             return 0.0
         return _imitation_bonus_from_samples(
-            compile_network(genome, config), self._imitation_samples
+            compile_network(genome, config), self._imitation_samples,
+            self._imitation_human_freq,
         )
 
     @staticmethod
     def _action_similarity(ai_action, human_action):
-        """Calcola somiglianza tra azione AI e azione umana (0-1)."""
+        """Calcola somiglianza tra azione AI e azione umana (0-1).
+
+        Media dell'accordo su movimento verticale, orizzontale (match esatto
+        = 1, off-by-one = 0.5) e sparo (match esatto); missile e bomba sono
+        esclusi (vedi _IMITATION_COMPONENTS).
+        """
         score = 0.0
-        total = 5.0  # 5 componenti
-
-        # Movimento verticale (match esatto = 1, off-by-one = 0.5)
-        v_diff = abs(ai_action['vertical'] - human_action['vertical'])
-        if v_diff == 0:
-            score += 1.0
-        elif v_diff == 1:
-            score += 0.5
-
-        # Movimento orizzontale
-        h_diff = abs(ai_action['horizontal'] - human_action['horizontal'])
-        if h_diff == 0:
-            score += 1.0
-        elif h_diff == 1:
-            score += 0.5
-
-        # Sparo (match esatto)
-        if ai_action['shoot'] == human_action['shoot']:
-            score += 1.0
-
-        # Missile (match esatto, retrocompat sessioni senza campo)
-        if ai_action['missile'] == human_action.get('missile', False):
-            score += 1.0
-
-        # Bomba (match esatto, retrocompat sessioni senza campo)
-        if ai_action['bomb'] == human_action.get('bomb', False):
-            score += 1.0
-
-        return score / total
+        for c in _IMITATION_COMPONENTS:
+            score += _component_agreement(c, ai_action[c], human_action[c])
+        return score / len(_IMITATION_COMPONENTS)
 
     @staticmethod
     def _decode_actions(output):
@@ -1234,67 +1586,82 @@ class NeatTrainer:
     def _load_imitation_samples(self):
         """Carica le sessioni umane ed estrae i campioni per l'imitation bonus.
 
-        Servono solo le ultime 5 sessioni valide (in ordine di nome file; i
-        pickle corrotti vengono saltati): i file si leggono a ritroso finche'
-        non se ne trovano 5 e di ogni sessione si tengono solo i frame
-        campionati, scartando il resto (le sessioni complete occupano
-        centinaia di MB in RAM).
+        Usa le IMITATION_TOP_SESSIONS sessioni valide con lo score piu' alto
+        (a parita' la piu' recente), ognuna pesata
+        min(IMITATION_WEIGHT_CAP, ln(1 + score / 1000)): il tetto impedisce
+        che una sola partita domini il bonus. I file si leggono uno alla volta
+        e di ogni sessione si tengono solo IMITATION_SAMPLES_PER_SESSION frame
+        equidistanti (le sessioni complete occupano decine di MB in RAM).
+        File illeggibili o sessioni malformate (chiavi mancanti, obs di
+        lunghezza diversa da num_inputs) vengono saltati con un avviso.
 
         Imposta _imitation_samples, lista di (obs, azione umana, peso) o None
-        se non c'e' nessuna sessione valida, e _human_sessions_count (file
-        .pkl su disco, mostrato nell'overlay del training visuale).
+        se non c'e' nessuna sessione valida, _imitation_human_freq (frequenze
+        pesate delle azioni umane, per la somiglianza attesa per caso) e
+        _human_sessions_count (file .pkl su disco, mostrato nell'overlay del
+        training visuale).
         """
         self._imitation_samples = None
+        self._imitation_human_freq = None
         self._human_sessions_count = 0
-        if not os.path.exists(SESSIONS_DIR):
+        if not os.path.isdir(SESSIONS_DIR):
             return
 
         filenames = sorted(f for f in os.listdir(SESSIONS_DIR) if f.endswith('.pkl'))
-        per_session = []  # campioni per sessione, dalla piu' recente
-        for filename in reversed(filenames):
-            if len(per_session) == 5:
-                break
+        self._human_sessions_count = len(filenames)
+        num_inputs = self.config.genome_config.num_inputs
+        candidates = []  # (score, nome file, [(obs, azione)])
+        for filename in filenames:
             filepath = os.path.join(SESSIONS_DIR, filename)
             try:
                 with open(filepath, 'rb') as f:
                     session = pickle.load(f)
-            except (pickle.UnpicklingError, EOFError, KeyError):
+                score = float(session['score'])
+                frames = session['frames']
+                n = min(IMITATION_SAMPLES_PER_SESSION, len(frames))
+                picked = []
+                for i in range(n):
+                    obs, action = frames[i * len(frames) // n]
+                    if len(obs) != num_inputs:
+                        raise ValueError(f"obs di {len(obs)} valori invece di {num_inputs}")
+                    action = {c: action[c] for c in _IMITATION_COMPONENTS}
+                    if any(action[c] not in values for c, values in _IMITATION_COMPONENTS.items()):
+                        raise ValueError(f"azione non valida: {action}")
+                    picked.append((obs, action))
+            except Exception as e:
+                # pickle e sessioni malformate possono sollevare quasi ogni
+                # eccezione (UnpicklingError, EOFError, AttributeError,
+                # ModuleNotFoundError, KeyError, TypeError, ...)
+                print(f"Sessione umana ignorata ({filename}): {e!r}")
                 continue
+            if picked:
+                candidates.append((score, filename, picked))
 
-            # Ogni sessione pesata per score
-            score_weight = max(1.0, session['score'] / 500.0)
-            frames = session['frames']
-
-            # Campiona max 200 frame per sessione (uniformemente)
-            step = max(1, len(frames) // 200)
-            samples = []
-            for j in range(0, len(frames), step):
-                obs, human_action = frames[j]
-                samples.append((obs, human_action, score_weight))
-            per_session.append(samples)
-
-        if not per_session:
+        if not candidates:
             return
-        # Ordine cronologico, come le sessioni [-5:]
-        self._imitation_samples = [s for samples in reversed(per_session) for s in samples]
-        self._human_sessions_count = len(filenames)
+        candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
+        samples = []
+        for score, _filename, picked in candidates[:IMITATION_TOP_SESSIONS]:
+            weight = min(IMITATION_WEIGHT_CAP, math.log1p(max(0.0, score) / 1000.0))
+            samples.extend((obs, action, weight) for obs, action in picked)
+        self._imitation_samples = samples
+        self._imitation_human_freq = _action_frequencies(samples)
 
     def _find_latest_checkpoint(self):
-        """Trova il checkpoint NEAT piu' recente."""
-        if not os.path.exists(AI_DIR):
-            return None
+        """Trova il checkpoint NEAT leggibile con la generazione piu' alta.
 
-        checkpoints = [
-            f for f in os.listdir(AI_DIR)
-            if f.startswith("neat-checkpoint-")
-        ]
-        if not checkpoints:
-            return None
-
-        checkpoints.sort(
-            key=lambda f: int(f.split("-")[-1])
-        )
-        return os.path.join(AI_DIR, checkpoints[-1])
+        Ignora i suffissi non numerici e salta i file illeggibili (troncati
+        o corrotti), passando al precedente. Ritorna (path, config salvata
+        nel checkpoint) oppure (None, None).
+        """
+        for _generation, path in reversed(_list_checkpoints()):
+            try:
+                with gzip.open(path) as f:
+                    data = pickle.load(f)
+                return path, data[1]
+            except Exception as e:
+                print(f"Checkpoint illeggibile, ignorato: {path} ({e!r})")
+        return None, None
 
 class _TrainingInterrupted(Exception):
     """Eccezione interna per interrompere il training con ESC."""

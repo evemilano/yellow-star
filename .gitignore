@@ -14,3 +14,5 @@ build/
 *~
 scores.json.tmp
 scores.json.bak
+ai/neat-checkpoint-tmp
+ai/*.tmp

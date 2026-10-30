@@ -26,7 +26,7 @@ from src.enemy_bullet import EnemyBullet
 from src.level import LevelManager
 from src.powerup import PowerUp
 
-MS_PER_FRAME = 1000.0 / FPS  # ~33.3 ms
+MS_PER_FRAME = 1000.0 / FPS  # ~16.7 ms a 60 FPS
 
 
 def _nearest_n(sprites, px, py, n):
@@ -205,15 +205,22 @@ class GameEnv:
         self.powerups_collected = 0
         self.missiles_collected = 0
         self.enemies_killed = 0
+        self.missile_kills = 0    # nemici uccisi dai missili
+        self.bomb_kills = 0       # nemici distrutti dalle bombe
         self.shield_hits = 0
         self.shield_breaks = 0
-        self.idle_frames = 0
-        self.dodges = 0           # nemici/asteroidi passati senza collisione
+        self.idle_frames = 0      # frame in cui la nave non si e' spostata
+        self.dodges = 0           # nemici/asteroidi usciti dopo un passaggio ravvicinato
         self.shots_fired = 0
         self.shots_hit = 0
-        self.near_misses = 0      # schivate ravvicinate (entro 60px)
-        self._near_miss_ids = set()  # sprite gia' contati
-        self.powerup_approach_frames = 0  # frame in avvicinamento a powerup
+        self.near_misses = 0      # sprite arrivati entro 60px (uno per sprite)
+        self.powerup_approach_frames = 0  # frame in cui la nave si avvicina al power-up
+
+        # Missile e bomba scattano sul fronte di salita dell'azione (come il
+        # KEYDOWN umano): valori del frame precedente
+        self._prev_missile = False
+        self._prev_bomb = False
+        self._approach_this_frame = False
 
         # Game over
         self.done = False
@@ -238,11 +245,15 @@ class GameEnv:
         self.player.lives = PLAYER_LIVES
         self.player.missiles = 0
         self.player.invincible = False
+        self.player.invincible_timer = 0
         self.player.visible = True
+        self.player.blink_timer = 0
         self.player.reset_position((100, SCREEN_HEIGHT // 2))
         self.player.upgrades.reset()
         self.player._update_sprite(force=True)
         self.player.shield_hp = 0
+        self.player.shield_just_broke = False
+        self.player.shield_break_timer = 0.0
         self.player.bombs = 0
         self.player.last_shot = 0
 
@@ -262,6 +273,8 @@ class GameEnv:
         self.powerups_collected = 0
         self.missiles_collected = 0
         self.enemies_killed = 0
+        self.missile_kills = 0
+        self.bomb_kills = 0
         self.shield_hits = 0
         self.shield_breaks = 0
         self.idle_frames = 0
@@ -269,9 +282,10 @@ class GameEnv:
         self.shots_fired = 0
         self.shots_hit = 0
         self.near_misses = 0
-        self._near_miss_ids = set()
         self.powerup_approach_frames = 0
-        self._prev_powerup_dist = None
+        self._prev_missile = False
+        self._prev_bomb = False
+        self._approach_this_frame = False
         self.done = False
 
         self.last_enemy_spawn = 0
@@ -303,7 +317,7 @@ class GameEnv:
         dt = 1.0
         prev_score = self.score
         prev_lives = self.player.lives
-        prev_kills = self.enemies_killed
+        prev_kills = self.total_kills
         prev_shield_hits = self.shield_hits
         prev_shield_breaks = self.shield_breaks
         prev_powerups = self.powerups_collected
@@ -328,9 +342,9 @@ class GameEnv:
         if lives_delta > 0:
             self.lives_lost += lives_delta
 
-        kills_delta = self.enemies_killed - prev_kills
+        kills_delta = self.total_kills - prev_kills
         reward = 0.02  # piccolo bonus sopravvivenza
-        reward += kills_delta * 5.0  # reward istantaneo per uccisioni
+        reward += kills_delta * 5.0  # reward istantaneo per uccisioni (proiettile, missile, bomba)
         reward -= lives_delta * 200
         # Penalita' sparo per evitare spam
         if getattr(self, '_shot_this_frame', False):
@@ -346,44 +360,28 @@ class GameEnv:
             reward += self.level_manager.level ** 2 * 5.0
         reward += (self.total_upgrade_levels - prev_upgrades) * 5
 
-        # Near-miss: proiettili/nemici/asteroidi entro 60px senza collisione
+        # Near-miss: proiettili/nemici/asteroidi entro 60px, contati una volta
+        # per sprite. Il marcatore sta sullo sprite (non un set di id(): CPython
+        # riusa gli indirizzi degli oggetti liberati) e serve anche alle schivate
         px = self.player.rect.centerx
         py = self.player.rect.centery
         near_dist = 60
         for group in (self.enemy_bullets, self.enemies, self.asteroids):
             for sprite in group:
-                sid = id(sprite)
-                if sid in self._near_miss_ids:
+                if getattr(sprite, '_near_miss', False):
                     continue
                 dx = sprite.rect.centerx - px
                 dy = sprite.rect.centery - py
                 dist = (dx * dx + dy * dy) ** 0.5
                 if dist < near_dist:
-                    self._near_miss_ids.add(sid)
+                    sprite._near_miss = True
                     self.near_misses += 1
                     reward += 3.0
 
-        # Pulizia periodica near-miss IDs (rimuovi sprite non piu' in gioco)
-        if self.frame_count % 300 == 0 and self._near_miss_ids:
-            alive_ids = set()
-            for group in (self.enemy_bullets, self.enemies, self.asteroids):
-                for sprite in group:
-                    alive_ids.add(id(sprite))
-            self._near_miss_ids &= alive_ids
-
-        # Avvicinamento a powerup
-        if self.powerups:
-            nearest = min(
-                self.powerups.sprites(),
-                key=lambda p: (p.rect.centerx - px) ** 2 + (p.rect.centery - py) ** 2
-            )
-            dist = ((nearest.rect.centerx - px) ** 2 + (nearest.rect.centery - py) ** 2) ** 0.5
-            if self._prev_powerup_dist is not None and dist < self._prev_powerup_dist:
-                self.powerup_approach_frames += 1
-                reward += 0.1
-            self._prev_powerup_dist = dist
-        else:
-            self._prev_powerup_dist = None
+        # Avvicinamento a power-up: solo lo spostamento della nave in questo
+        # frame (misurato in _apply_actions), non lo scorrimento del power-up
+        if self._approach_this_frame:
+            reward += 0.1
 
         # Rendering opzionale
         if draw and self.render_mode and self.screen is not None:
@@ -393,16 +391,39 @@ class GameEnv:
 
     def _apply_actions(self, actions, dt):
         """Applica le azioni dell'AI al giocatore."""
-        # Conteggio frame senza movimento
-        if actions.get('vertical', 0) == 0 and actions.get('horizontal', 0) == 0:
-            self.idle_frames += 1
-
         speed = self.player.upgrades.player_speed
         dx = actions.get('horizontal', 0) * speed
         dy = actions.get('vertical', 0) * speed
 
+        # Power-up piu' vicino nella sua posizione attuale (scorre dopo, in
+        # _update): la distanza prima e dopo il movimento isola il contributo
+        # della nave, lo scorrimento del power-up non conta
+        rect = self.player.rect
+        pos_before = rect.topleft
+        target = None
+        if self.powerups:
+            px, py = rect.center
+            target = min(
+                self.powerups.sprites(),
+                key=lambda p: (p.rect.centerx - px) ** 2 + (p.rect.centery - py) ** 2
+            )
+            dist_before = (target.rect.centerx - px) ** 2 + (target.rect.centery - py) ** 2
+
         # Stesso movimento (sub-pixel + clamp) dell'umano e dell'AI in coop
         self.player.move(dx, dy, dt)
+
+        # Inattivita' misurata sullo spostamento reale: anche premere contro
+        # il bordo (rect invariato dopo il clamp) conta come fermo
+        rect = self.player.rect
+        if rect.topleft == pos_before:
+            self.idle_frames += 1
+        self._approach_this_frame = False
+        if target is not None:
+            px, py = rect.center
+            dist_after = (target.rect.centerx - px) ** 2 + (target.rect.centery - py) ** 2
+            if dist_after < dist_before:
+                self.powerup_approach_frames += 1
+                self._approach_this_frame = True
 
         # Gestione invincibilita'
         if self.player.invincible:
@@ -427,20 +448,24 @@ class GameEnv:
         else:
             self._shot_this_frame = False
 
-        # Missile
-        if actions.get('missile', False):
+        # Missile e bomba sul fronte di salita (come il KEYDOWN umano): tenere
+        # alto l'output non svuota le scorte in frame consecutivi
+        missile = bool(actions.get('missile', False))
+        if missile and not self._prev_missile:
             self.player.shoot_missile(self.missiles, self.enemies)
+        self._prev_missile = missile
 
-        # Bomba (controllata dall'AI)
-        if actions.get('bomb', False) and self.player.bombs > 0:
+        bomb = bool(actions.get('bomb', False))
+        if bomb and not self._prev_bomb and self.player.bombs > 0:
             self._use_bomb()
+        self._prev_bomb = bomb
 
     def _update(self, dt):
         """Aggiorna tutti gli sprite e gestisce le collisioni."""
         lm = self.level_manager
 
         if self._bg and self.render_mode:
-            self._bg.update(dt)
+            self._bg.update(dt, lm.level)
 
         # Update sprite (NON player.update perche' gia' gestito in _apply_actions)
         self.bullets.update(dt)
@@ -448,17 +473,23 @@ class GameEnv:
         # dentro update(), ma le kill del suo ultimo frame vanno contate
         live_missiles = self.missiles.sprites()
         self.missiles.update(dt)
-        # Traccia nemici/asteroidi che escono dallo schermo (schivate)
-        enemies_before = len(self.enemies)
+        # Schivate: nemici e asteroidi che escono dallo schermo (l'unico modo
+        # di lasciare il gruppo dentro update(): missili, proiettili e bomba
+        # uccidono altrove) dopo un passaggio ravvicinato (near-miss) senza
+        # aver colpito la nave; un asteroide che colpisce resta in gioco
+        enemies_before = self.enemies.sprites()
         self.enemies.update(dt)
-        asteroids_before = len(self.asteroids)
+        if len(self.enemies) < len(enemies_before):
+            for e in enemies_before:
+                if not e.alive() and getattr(e, '_near_miss', False):
+                    self.dodges += 1
+        asteroids_before = self.asteroids.sprites()
         self.asteroids.update(dt)
-        # Nemici/asteroidi usciti dallo schermo = schivati (non uccisi)
-        enemies_exited = enemies_before - len(self.enemies)
-        asteroids_exited = asteroids_before - len(self.asteroids)
-        # Nota: le uccisioni vengono sottratte dopo nelle collisioni
-        # ma qui i kill da proiettile non sono ancora avvenuti
-        self.dodges += enemies_exited + asteroids_exited
+        if len(self.asteroids) < len(asteroids_before):
+            for a in asteroids_before:
+                if (not a.alive() and getattr(a, '_near_miss', False)
+                        and not getattr(a, '_hit_player', False)):
+                    self.dodges += 1
         self.powerups.update(dt)
         self.explosions.update(dt)
         self.enemy_bullets.update(dt)
@@ -512,6 +543,7 @@ class GameEnv:
         for missile in live_missiles:
             if missile.total_kills > 0:
                 self.score += missile.total_kills * 150
+                self.missile_kills += missile.total_kills
                 missile.total_kills = 0
             for pos in missile.kill_positions:
                 self.explosions.add(Explosion(*pos))
@@ -551,6 +583,7 @@ class GameEnv:
         if not self.player.invincible and not bomb_field_active:
             hit_ast = pygame.sprite.spritecollideany(self.player, self.asteroids)
             if hit_ast:
+                hit_ast._hit_player = True  # uscendo non conta come schivata
                 if not self._player_take_hit():
                     return
 
@@ -581,6 +614,11 @@ class GameEnv:
     def total_upgrade_levels(self):
         return sum(self.player.upgrades.levels.values())
 
+    @property
+    def total_kills(self):
+        """Nemici uccisi con qualsiasi arma (proiettili, missili, bomba)."""
+        return self.enemies_killed + self.missile_kills + self.bomb_kills
+
     def _try_drop_powerup(self, x, y):
         if random.random() < POWERUP_DROP_CHANCE:
             self.powerups.add(PowerUp(x, y))
@@ -593,6 +631,7 @@ class GameEnv:
 
         for enemy in list(self.enemies):
             self.score += 100 * score_mult
+            self.bomb_kills += 1
             self.explosions.add(Explosion(enemy.rect.centerx, enemy.rect.centery))
             enemy.kill()
 

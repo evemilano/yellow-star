@@ -108,10 +108,10 @@ The main menu presents four options navigable with arrow keys (menu labels are i
 Standard keyboard-controlled gameplay. Every game is **recorded** for imitation learning and saved to `ai/human_sessions/` when it ends with a game over (leaving with `ESC` before game over discards the recording). Up to 20 sessions are retained (oldest deleted first).
 
 ### 2. Train AI (Headless)
-Background NEAT training with no game rendering. Uses **multiprocessing** to evaluate genomes in parallel on `cpu_count - 1` worker processes; the population size is forced to **300**. A real-time dashboard is drawn in the game window (progress, fitness, fitness breakdown, species, AI behavior, efficiency); neat-python's `StdOutReporter` also prints per-generation statistics to the console. `ESC` or closing the window interrupts training and returns to the menu.
+Background NEAT training with no game rendering. Uses **multiprocessing** to evaluate genomes (and to validate the best ones) in parallel on `cpu_count - 1` worker processes; the population size is forced to **200** (`HEADLESS_POP_SIZE`). A real-time dashboard is drawn in the game window (progress, fitness, fitness breakdown, species, AI behavior, efficiency); neat-python's `StdOutReporter` also prints per-generation statistics to the console. `ESC` or closing the window interrupts training and returns to the menu.
 
 ### 3. View AI Training (Visual)
-Same NEAT training, but genomes are evaluated serially in the main process with live rendering of each genome playing (biome background, minimal HUD, training overlay). Only 1 frame out of 4 is drawn (`TRAIN_RENDER_SKIP = 4`) and there is no frame-rate cap. The population size comes from the NEAT config (150 in `ai/neat_config.txt`, or the value stored in the checkpoint being resumed).
+Same NEAT training, but genomes are evaluated serially in the main process with live rendering of each genome playing (biome background, minimal HUD, training overlay). Only 1 frame out of 4 is drawn (`TRAIN_RENDER_SKIP = 4`) and there is no frame-rate cap. Each genome plays the same episodes as in headless mode (same seeds, same fitness). The population size comes from the NEAT config (150 in `ai/neat_config.txt`, also when resuming a headless checkpoint: its first generation still evaluates the restored population). The end-of-generation validation runs in the main process without rendering, with a progress screen.
 
 ### 4. Coop AI
 Human and a trained AI agent play **simultaneously** on the same screen. Requires a saved `ai/best_genome.pkl` from prior training (otherwise the menu entry is greyed out and `ENTER` on it does nothing). If the file exists but cannot be used (corrupted pickle, or a genome incompatible with `ai/neat_config.txt` and the 52-value observation), the error is printed to the console and the game starts without the AI ship, showing "Genoma AI non valido: si gioca senza AI" for 5 seconds. Both ships share the game world and the score; each ship has its own lives, upgrades, missiles and bombs, and power-ups go to whichever ship picks them up. The AI ship is tinted blue with an "AI" label. When the AI loses its 3 lives it is removed ("AI eliminata!"); the game ends only when the human loses.
@@ -134,10 +134,12 @@ Aimed enemies target the nearest living ship at the moment they fire, so the hum
 | `Arrow Keys` | Move (4 directions) |
 | `SPACE` (hold) | Shoot |
 | `M` | Fire missile (one per key press) |
-| `B` | Detonate bomb |
+| `B` | Detonate bomb (one per key press) |
 | `ESC` | Return to main menu |
 
 After game over: type a name (max 10 characters, `BACKSPACE` to delete), `ENTER` to save it (non-empty name) to the Top 10 leaderboard, then `ENTER` again to restart.
+
+Each simulation step applies the human's actions in the same order as `GameEnv`: movement first, then shot, missile and bomb (`M`/`B` presses are collected once per rendered frame and applied at the next step), then the rest of the world moves.
 
 - **Speed**: Base 6 px/frame (at 60 FPS), +10% per engine level up to 2x (12 px/frame); fractional speeds are kept with sub-pixel movement, so every engine level is effective
 - **Health**: 3 lives + shield HP (0-5) from shield upgrades; the shield absorbs hits before lives
@@ -164,7 +166,7 @@ Shooter probability per enemy is a lookup table indexed by level (`ENEMY_SHOOTER
 
 ### Power-ups & Upgrades
 
-Enemies destroyed by bullets or missiles have a **15% drop chance** for one of 4 power-up types (chosen uniformly). Kills by bomb or by ramming never drop power-ups.
+Enemies destroyed by bullets or missiles have a **15% drop chance** for one of 4 power-up types (chosen uniformly). Kills by bomb or by ramming never drop power-ups. Power-ups drift left at 2 px/frame (clamped only vertically to the screen) and disappear when they leave the screen on the left, like missile pickups.
 
 | Type | Color | Icon | Effect |
 |------|-------|------|--------|
@@ -238,7 +240,7 @@ Difficulty affects:
 │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐   │
 │  │  NEAT Config │  │  Population  │  │  Checkpoints  │   │
 │  │ (neat_config │  │ (150 config, │  │ (every 10     │   │
-│  │   .txt)      │  │ 300 headless)│  │  gens, last 2)│   │
+│  │   .txt)      │  │ 200 headless)│  │  gens, last 2)│   │
 │  └──────┬───────┘  └──────┬───────┘  └───────────────┘   │
 │         │                 │                              │
 │         ▼                 ▼                              │
@@ -291,18 +293,22 @@ Both loops advance the simulation in fixed steps of `1000 / FPS` ms with `dt = 1
 | `out[0]` | < -0.2 / > 0.2 | Move up / Move down |
 | `out[1]` | < -0.2 / > 0.2 | Move left / Move right |
 | `out[2]` | > 0.3 | Shoot |
-| `out[3]` | > 0.5 | Fire missile |
-| `out[4]` | > 0.5 | Detonate bomb |
+| `out[3]` | > 0.5 | Fire missile (rising edge) |
+| `out[4]` | > 0.5 | Detonate bomb (rising edge) |
+
+Missile and bomb fire only on the step in which the decoded action goes from False to True (in `GameEnv._apply_actions` and for the Coop AI ship), like a human key press: holding the output high does not empty the stock on consecutive steps. `tanh` is the only `activation_options` value, so activation mutations can no longer turn an output into `sigmoid` ([0, 1]) or `relu` ([0, ∞)), which cannot go below -0.2 (no up/left); nodes of older genomes that already use them still load and run, and are replaced by `tanh` when their activation mutates.
 
 ### Fitness Function
 
-Fitness is computed by `_compute_fitness(env)` in `src/neat_trainer.py` from the statistics counters of `GameEnv` at the end of the episode. Multi-component fitness with 15 terms (the game score itself is not a term):
+Fitness is computed by `_compute_fitness(env)` in `src/neat_trainer.py` from the statistics counters of `GameEnv` at the end of each episode; a genome's fitness is the **mean over its episodes** (2 per generation, see Training Pipeline). Multi-component fitness with 16 terms (the game score itself is not a term). Time-based terms are in seconds of game time (`frames / FPS`), so the weights do not depend on `settings.FPS`:
 
 ```
-fitness = enemies_killed × 50          # bullet kills only
-        + dodges × 5                   # enemies/asteroids that left the screen
-        + accuracy_bonus               # (shots_hit / shots_fired) × enemies_killed × 10
-        + frame_count × 0.05           # survival time
+fitness = enemies_killed × 50          # bullet kills
+        + missile_kills × 50           # enemies killed by missiles
+        + bomb_kills × 50              # enemies destroyed by bombs
+        + accuracy_bonus               # (shots_hit / shots_fired) × enemies_killed × 10 (bullet kills only)
+        + dodges × 5                   # close passes survived (see below)
+        + seconds × 1.5                # survival time
         - lives_lost × 200             # death penalty
         + level² × 50                  # progression bonus
         + powerups_collected × 50
@@ -310,75 +316,100 @@ fitness = enemies_killed × 50          # bullet kills only
         + total_upgrade_levels × 20
         - shield_hits × 15
         - shield_breaks × 120
-        - idle_ratio × frame_count × 0.5   # inactivity penalty (frames without movement)
+        - idle_seconds × 15            # time in which the ship did not move
         + near_misses × 3              # sprites that came within 60 px
-        + powerup_approach_frames × 0.1
+        + approach_seconds × 3         # time spent moving towards the nearest power-up
         - shots_fired × 0.01
 ```
 
-Fitness is not clipped at 0. `shots_fired` counts volleys, `shots_hit` counts bullets that hit at least one enemy. In headless mode, a genome whose evaluation raises an exception gets a fitness of -10000 (with no imitation bonus). The imitation bonus (below) is added on top.
+`FITNESS_VERSION` (currently 2) identifies this formula together with the `GameEnv` rules and the validation suite; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
+
+How the counters are measured in `GameEnv`:
+- **Kills**: `enemies_killed` counts bullet kills, `missile_kills` the kills of every missile (counted on the snapshot taken before `missiles.update()`, so the kills of the frame in which a missile is spent or leaves the screen are included), `bomb_kills` the enemies cleared by a bomb.
+- **Idle**: a frame is idle when the ship's rect did not change after the movement and the screen clamp, so holding a direction against an edge counts as idle.
+- **Power-up approach**: a frame counts when the ship's own movement brings it closer to the nearest power-up, measured against the power-up's position before it drifts (power-ups drifting towards a still ship do not count).
+- **Near-miss**: an enemy, asteroid or enemy bullet counts once, the first time its center comes within 60 px of the ship's center (the mark is stored on the sprite).
+- **Dodges**: an enemy or asteroid that leaves the screen after a near-miss without having hit the ship; enemies destroyed by any weapon or by ramming never count, nor do asteroids that hit the ship.
+
+Fitness is not clipped at 0. `shots_fired` counts volleys, `shots_hit` counts bullets that hit at least one enemy. A genome whose evaluation raises an exception gets a fitness of -10000 (with no imitation bonus) and the traceback is printed to the console. The imitation bonus (below) is added on top.
 
 **Per-step reward** (`GameEnv.step()`): `step()` also returns a shaped reward, which `NeatTrainer` does not use (fitness comes only from `_compute_fitness`):
 - Survival bonus: `+0.02` per frame
-- Bullet kill: `+5` per enemy
+- Kill: `+5` per enemy (bullet, missile or bomb)
 - Death penalty: `-200` per life lost
 - Shot penalty: `-0.01` per volley fired
 - Shield: `-15` per shield hit, `-60` per shield break
 - Pickups: `+10` per upgrade power-up, `+5` per missile pickup, `+5` per upgrade level gained
 - Level up: `+level² × 5`
 - Near-miss bonus: `+3.0` the first time an enemy, asteroid or enemy bullet comes within 60 px of the player
-- Power-up approach: `+0.1` per frame getting closer to the nearest power-up
+- Power-up approach: `+0.1` per frame in which the ship moves closer to the nearest power-up
 
-**Early termination** (constants in frames, `EARLY_STOP_*`): from frame 180 (`EARLY_STOP_MIN_FRAME`) the episode is checked whenever the frame index is a multiple of 150 (`EARLY_STOP_INTERVAL`), i.e. at frame 300, 450, 600, … The genome is stopped if it has lost 3 lives (`EARLY_STOP_MAX_LIVES_LOST`; with `PLAYER_LIVES = 3` this coincides with game over) or if it has been idle (no movement) for at least 70% of the frames (`EARLY_STOP_IDLE_RATIO`). In headless workers the lives check applies from generation 10; in visual mode the limit before generation 10 is `PLAYER_LIVES`, i.e. the same value. The source comments assume 30 FPS ("every 5 seconds", "6 seconds"); at the actual `FPS = 60` the check runs every 2.5 s, starting at 5 s of game time.
+**Early termination** (constants in seconds converted with `FPS`, `EARLY_STOP_*`, shared by headless workers and visual mode through `_early_stop()`): from 6 s (`EARLY_STOP_MIN_FRAME`, 360 frames) the episode is checked every 5 s (`EARLY_STOP_INTERVAL`, 300 frames), i.e. at frame 600, 900, 1200, … The genome is stopped if, from generation 10 (`EARLY_STOP_LIVES_GEN`), it has lost 2 of its 3 lives (`EARLY_STOP_MAX_LIVES_LOST`), or if it has been idle (not moving, edges included) for at least 70% of the frames (`EARLY_STOP_IDLE_RATIO`). Validation episodes have no early termination.
 
 ### Imitation Learning
 
-Human gameplay is recorded during **Play** mode only via the `HumanRecorder` class (one frame per game update). Coop games are not recorded; sessions recorded in Coop by earlier versions (indistinguishable, no flag) are still in `ai/human_sessions/` until rotation removes them.
+Human gameplay is recorded during **Play** mode only via the `HumanRecorder` class (one frame per simulation step). Coop games are not recorded; sessions recorded in Coop by earlier versions (indistinguishable, no flag) are still in `ai/human_sessions/` until rotation removes them.
 
 **Recording format** (per frame):
 ```python
 (observation_52dim, action_dict)  # action = {vertical, horizontal, shoot, missile, bomb}
 ```
 
-**Sessions stored**: `ai/human_sessions/session_{timestamp}.pkl`, a dict `{frames, score, num_frames, timestamp}`, written at game over (max 20 retained)
+Each pair is the same one the network sees in `GameEnv`: the observation is the state at the end of the previous step (`Game._pending_obs`, captured at the end of `_update`, at game start and at restart), the action is what the human does in this step. With opposite keys held, the recorded direction is the one the ship actually moves in (down and right win, as in `Player.update`).
 
-**Bonus application** (from generation 10, `IMITATION_START_GEN`, computed for every genome: in headless mode by the worker process right after the episode, in visual mode in the main process):
-1. Load the human sessions once per training run, before the worker pool is created, and use the 5 most recent valid ones, each weighted by `max(1, score / 500)`; only the sampled frames are kept in memory and passed to the workers
-2. Sample frames uniformly with step `max(1, len(frames) // 200)` (about 200-400 frames per session)
+**Sessions stored**: `ai/human_sessions/session_{timestamp}.pkl`, a dict `{frames, score, num_frames, timestamp, version}`, written at game over (max 20 retained). Sessions without `version` (version 1, recorded before October 2026) pair the action with the observation taken after that step's shot, missile and bomb, and with opposite keys held record the direction opposite to the movement; they are still used.
+
+**Bonus application** (from generation 10, `IMITATION_START_GEN`, computed for every genome: in headless mode by the worker process right after the episodes, in visual mode in the main process):
+1. Load the human sessions once per training run, before the worker pool is created, and use the 5 valid sessions with the highest score (`IMITATION_TOP_SESSIONS`; ties go to the most recent), each weighted by `min(4, ln(1 + score / 1000))`, so that no single game dominates; unreadable or malformed sessions are skipped with a warning
+2. Keep 200 evenly spaced frames per session (`IMITATION_SAMPLES_PER_SESSION`; fewer if the session is shorter); only these are kept in memory and passed to the workers
 3. Feed each observation to the evolved network
-4. Compare network output with recorded human action
-5. Score similarity across all 5 action dimensions: movement axes 1 (match) / 0.5 (off by one) / 0 (opposite), shoot/missile/bomb 1 if equal; average → 0-1
-6. Apply bonus: `weighted_avg_similarity × 300` (max 300 fitness points)
+4. Compare the network's decoded action with the recorded human action on movement and shooting only: movement axes 1 (match) / 0.5 (off by one) / 0 (opposite), shoot 1 if equal; average → 0-1. Missile and bomb are excluded: human presses are so rare that comparing them would only reward never using them
+5. Subtract the similarity expected by chance: `sim_chance` is the similarity that a policy with the genome's own action frequencies would get if it ignored the observation (weighted Cohen's kappa, computed from the genome's and the humans' weighted action frequencies)
+6. Apply bonus: `max(0, sim - sim_chance) / (1 - sim_chance) × 300` (max 300 fitness points)
+
+Any constant policy (standing still, always shooting, holding a direction) and any random policy independent of the state get a bonus of 0: only acting like the human in the same situations is rewarded. With the 15 sessions in the repository and the checkpoint-80 population, the bonus is between 0 and ~11 (the evolved genomes show almost no state-dependent agreement with the human player yet); a baseline equal to the best constant policy would have given 0 to every genome, a baseline equal to "do nothing" would have given 188 to "always shoot".
 
 This acts as a **soft behavioral prior** — once the bonus is active, genomes that play like humans receive a fitness bonus, steering evolution away from degenerate strategies.
 
 ### Training Pipeline
 
 ```
-1. Load NEAT config + latest checkpoint (if any)
-   - a resumed run uses the config stored in the checkpoint
-   - headless forces pop_size = 300 (new or resumed run)
-   - ai/best_genome.pkl (if present) sets the current fitness record
+1. Load NEAT config + latest readable checkpoint (if any)
+   - pop_size is set first: 200 in headless (HEADLESS_POP_SIZE), the config value (150) in visual
+   - a resumed run uses ai/neat_config.txt (restore_checkpoint(new_config=...)), keeping the
+     compatibility threshold adapted in the checkpoint; the restored species set is re-bound to
+     the live species_set_config so threshold changes take effect
+   - if the checkpoint was saved with a different FITNESS_VERSION, the species fitness
+     history is reset (it would otherwise be on the old scale and mark every species stagnant)
+   - the validation record of ai/best_genome.pkl is read from ai/best_genome_meta.json, or
+     recomputed with the validation suite if the sidecar is missing or stale
 2. For each generation:
-   a. Evaluate all genomes
-      - headless: persistent multiprocessing.Pool, imap_unordered (chunksize=1)
+   a. Evaluate all genomes on the same 2 seeds (common random numbers: generation × 1000 + k,
+      new each generation); fitness = mean of the 2 episodes
+      - headless: persistent multiprocessing.Pool, imap_unordered (chunksize=1), one task per genome
       - visual: serial, in-process, rendering 1 frame out of 4
       - Each evaluation: compile the genome's FeedForwardNetwork into a generated Python function
-        (same outputs as neat's activate(), about 2x faster) → run GameEnv episode
-      - Episode length cap: 900 → 5400 frames, linear over the first 50 generations
-        (15 s → 90 s of game time at FPS = 60; the source comments say 30 s - 3 min, assuming 30 FPS)
+        (same outputs as neat's activate(), about 2x faster) → run the GameEnv episodes
+      - Episode length cap: 30 s → 180 s of game time (1800 → 10800 frames at FPS = 60),
+        linear over the first 50 generations
       - Virtual time system ensures deterministic evaluation
         (pygame.time.get_ticks patched to frame_count × 1000 / FPS, ≈16.7 ms per frame)
-      - Per-genome seed: genome_id + generation × 10000
    b. Apply imitation learning bonus (from gen 10; headless: computed in the workers)
-   c. Save best genome to ai/best_genome.pkl if new record
-   d. Check for stagnation, adjust speciation / inject diversity if needed
+   c. Validation: the 5 genomes with the highest game fitness (without imitation) play one full
+      episode (10800 frames, no early termination, no imitation) on each of 10 fixed seeds;
+      the best mean replaces ai/best_genome.pkl if it beats the validation record
+      (headless: in the Pool; genomes already validated in the session, e.g. elites, are cached)
+   d. Adjust the compatibility threshold if needed (Anti-Stagnation)
    e. Update real-time dashboard
    f. NEAT reproduction + speciation (neat-python)
-   g. Checkpoint every 10 generations (only the last 2 kept)
+   g. Checkpoint every 10 generations (only the last 2 kept), and on interruption
 ```
 
-**Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy` and a 1×1 display for headless Pygame operation, receives the imitation samples through the pool initializer, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation is distributed via `pool.imap_unordered()`; the dashboard is refreshed (and `ESC` polled) every 5 completed genomes.
+**Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy` and a 1×1 display for headless Pygame operation, receives the imitation samples and the human action frequencies through the pool initializer, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation and validation episodes are distributed via `pool.imap_unordered()`; the dashboard is refreshed (and `ESC` polled) every 5 completed genomes and after every validation episode.
+
+**Cost** (8-core machine, 7 workers, measured on the checkpoint-80 population): about 150 worker-µs per game frame; a generation of 200 genomes × 2 episodes takes ~13 s plus ~5 s of validation while genomes die early (~1500 frames per episode), and would take ~95 s plus up to ~12 s of validation if every episode reached the 180 s cap.
+
+**Dashboard**: the fitness breakdown shows every component (bullet, missile and bomb kills, shooting penalty and imitation bonus included), so its TOTAL equals the genome's fitness; "Record val." is the validation record; gen/min and evaluated genomes count only the current session.
 
 ### NEAT Hyperparameters
 
@@ -386,10 +417,10 @@ From `ai/neat_config.txt`:
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Population size | 150 | Forced to 300 in headless training |
+| Population size | 150 | Forced to 200 in headless training (`HEADLESS_POP_SIZE`) |
 | Fitness criterion | max | `fitness_threshold = 99999`, `no_fitness_termination = True`, `reset_on_extinction = True` |
 | Initial topology | 52→5 fully connected (`full_direct`) | No hidden nodes, feed-forward |
-| Activation | tanh (default) | sigmoid, relu available via mutation (rate 10%) |
+| Activation | tanh | Only option (`activation_options = tanh`): sigmoid/relu nodes of older genomes mutate back to tanh |
 | Aggregation | sum | Not mutated |
 | Weight mutation rate | 40% | Power 0.5, replace rate 10%, range ±5 |
 | Bias mutation rate | 70% | Power 0.5, replace rate 10%, range ±5 |
@@ -397,9 +428,9 @@ From `ai/neat_config.txt`:
 | Node add prob | 35% | Hidden neuron insertion |
 | Connection delete prob | 20% | Pruning |
 | Node delete prob | 10% | Simplification |
-| Compatibility threshold | 3.0 | Initial species boundary (adjusted at runtime by anti-stagnation) |
+| Compatibility threshold | 3.0 | Initial species boundary for a new run (adjusted at runtime by anti-stagnation; a resumed run keeps the adapted value) |
 | Compatibility coefficients | disjoint 1.0, weight 0.5 | |
-| Stagnation limit | 12 gens | Per-species patience (`species_fitness_func = max`) |
+| Stagnation limit | 12 gens | Per-species patience (`species_fitness_func = mean`) |
 | Species elitism | 2 | Species protected from stagnation removal |
 | Elitism | 3 | Top genomes preserved per species |
 | Survival threshold | 20% | Only top 20% reproduce |
@@ -407,25 +438,25 @@ From `ai/neat_config.txt`:
 
 ### Anti-Stagnation Mechanisms
 
-Run by `_check_and_fix_stagnation()` after every generation (the fitness history is kept in memory and restarts with each training run):
+1. **Speciation control** (`_check_and_fix_stagnation()`, after every generation): if 2 or fewer species remain, the compatibility threshold is multiplied by 0.85 (min 1.0) to encourage speciation; with more than 20 species it is multiplied by 1.1 (max 6.0) to avoid fragmentation. The change applies to the next speciation, also after a resume
+2. **Species stagnation** (neat-python `DefaultStagnation`): species whose mean fitness does not improve on their best for 12 generations are removed (the 2 best species are always protected)
+3. **Noise reduction**: common seeds for the whole generation and a 2-episode mean make species fitness and elites less dependent on a lucky episode
 
-1. **Speciation control**: If 2 or fewer species remain, the compatibility threshold is multiplied by 0.85 (min 1.0) to encourage speciation; with more than 20 species it is multiplied by 1.1 (max 6.0) to avoid fragmentation
-2. **Fitness plateau detection**: If the best-of-generation fitness varies by less than 3% over the last 20 generations, the worst 15% of the population (min 10 genomes) is replaced: half with fresh random genomes, half with copies of the all-time best genome mutated twice
-3. **Deep stagnation**: If it varies by less than 5% over the last 50 generations, an aggressive injection replaces 25% (min 10), with best-genome copies mutated three times
-4. **Species stagnation** (neat-python): species that don't improve for 12 generations are removed (the 2 best species are always protected)
-
-Injection happens inside the evaluation callback, after the generation has been evaluated, and the injected genomes have `fitness = None`. neat-python 1.1.0's `Population.run()` raises `RuntimeError("Fitness not assigned to genome …")` when any genome lacks a fitness after evaluation.
+The former injection of fresh/mutated genomes on fitness plateaus was removed: it ran inside the evaluation callback, left genomes without fitness (neat-python's `Population.run()` raises `RuntimeError`) and the injected genomes never reached reproduction.
 
 ### Checkpointing & Persistence
 
 | File | Format | Content |
 |------|--------|---------|
-| `ai/neat-checkpoint-{N}` | gzip-compressed pickle | Full NEAT state: generation, config, population, species, random state |
-| `ai/best_genome.pkl` | Pickle | Single best-performing genome (used for Coop mode) |
-| `ai/human_sessions/session_*.pkl` | Pickle | Recorded human (observation, action) frame pairs + final score |
+| `ai/neat-checkpoint-{N}` | gzip-compressed pickle | Full NEAT state: generation, config (with `fitness_version`), population, species, random state |
+| `ai/best_genome.pkl` | Pickle | The genome with the best validation mean (used for Coop mode) |
+| `ai/best_genome_meta.json` | JSON | Validation record of `best_genome.pkl`: `validation_mean`, per-seed fitness, `validation_seeds`, `max_frames`, `fitness_version`, `genome_key`, generation, timestamp |
+| `ai/human_sessions/session_*.pkl` | Pickle | Recorded human (observation, action) frame pairs + final score + format version |
 | `scores.json` | JSON | Top-10 human player leaderboard (`name`, `score`), UTF-8, written atomically (temporary file + `os.replace`). A missing, empty or invalid file reads as an empty leaderboard (malformed entries are skipped); an unparsable file is renamed to `scores.json.bak` before the next save; if the file cannot be written the score is not saved and the game goes on |
 
-Checkpoints are saved every 10 generations by `_RollingCheckpointer`, which deletes all but the 2 most recent (`MAX_CHECKPOINTS = 2`), and are automatically discovered on startup (highest generation loaded for resume). `ai/best_genome.pkl` is overwritten whenever a generation beats the record. These files are committed to the repository so training can continue across machines.
+Checkpoints are saved every 10 generations by `_RollingCheckpointer` (the first one right after the first generation of a resumed run), and also when training is interrupted with `ESC`, by closing the window or with Ctrl+C, if at least one generation was completed in the session. Each checkpoint is written to a temporary file (`neat-checkpoint-tmp`) and renamed, so an interrupted write never leaves a truncated checkpoint; the rotation keeps the 2 most recent up to the one just saved (`MAX_CHECKPOINTS = 2`). On startup the readable checkpoint with the highest generation is resumed: unreadable files are skipped with a warning and non-numeric suffixes (e.g. `.bak`) are ignored.
+
+`ai/best_genome.pkl` (same format as before: a pickled `DefaultGenome`) and its sidecar are written atomically whenever a validated genome beats the record. If the sidecar is missing, refers to another genome, or was written with another `FITNESS_VERSION`, validation seeds or episode cap, the existing `best_genome.pkl` is re-validated at startup to set the record. These files are committed to the repository so training can continue across machines.
 
 ---
 
@@ -465,7 +496,8 @@ Yellow-Star/
 │
 ├── ai/
 │   ├── neat_config.txt      # NEAT hyperparameter configuration
-│   ├── best_genome.pkl      # Best evolved genome (for Coop mode)
+│   ├── best_genome.pkl      # Best validated genome (for Coop mode)
+│   ├── best_genome_meta.json  # Validation record of best_genome.pkl (created by training)
 │   ├── neat-checkpoint-*    # Population checkpoints (every 10 generations, last 2 kept)
 │   └── human_sessions/      # Recorded human play sessions (.pkl)
 │
@@ -479,7 +511,7 @@ Yellow-Star/
 
 ## Configuration Reference
 
-All game constants are defined in [settings.py](settings.py) (NEAT parameters are in `ai/neat_config.txt`; training constants such as `MAX_FRAMES_PER_EPISODE` and `EARLY_STOP_*` are at the top of `src/neat_trainer.py`). Speeds are in px per frame at 60 FPS:
+All game constants are defined in [settings.py](settings.py) (NEAT parameters are in `ai/neat_config.txt`; training constants such as `MAX_EPISODE_SECONDS`, `EARLY_STOP_*`, `HEADLESS_POP_SIZE`, `EPISODES_PER_GENOME`, `VALIDATION_*`, `IMITATION_*` and `FITNESS_VERSION` are at the top of `src/neat_trainer.py`). Speeds are in px per frame at 60 FPS:
 
 ### Display
 
@@ -535,7 +567,7 @@ All game constants are defined in [settings.py](settings.py) (NEAT parameters ar
 | Constant | Value | Description |
 |----------|-------|-------------|
 | `POWERUP_DROP_CHANCE` | 0.15 | 15% drop on enemy kill (bullet or missile) |
-| `POWERUP_SPEED` | 2 | Drift speed (px/frame) |
+| `POWERUP_SPEED` | 2 | Drift speed (px/frame); the power-up disappears past the left edge |
 | `BOMB_FREEZE_DURATION` | 1000 | Spawn freeze on bomb (ms) |
 | `BOMB_FIELD_DURATION` | 2000 | Protective field on lv10 bomb (ms) |
 

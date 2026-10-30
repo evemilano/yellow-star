@@ -99,8 +99,9 @@ class Game:
 
         # Registrazione sessione per AI
         self.recorder = None
-        self._frame_missile_pressed = False  # flag keydown per recorder
-        self._frame_bomb_pressed = False     # flag keydown per recorder
+        self._frame_missile_pressed = False  # keydown missile, applicato in _update
+        self._frame_bomb_pressed = False     # keydown bomba, applicato in _update
+        self._pending_obs = None  # obs di fine passo precedente (recorder)
         if record_for_ai:
             from src.human_recorder import HumanRecorder
             self.recorder = HumanRecorder()
@@ -113,6 +114,9 @@ class Game:
         self.ai_missiles = pygame.sprite.Group()
         self.ai_dead_msg_timer = 0.0
         self.ai_error_msg_timer = 0.0
+        # Missile e bomba dell'AI sul fronte di salita, come in GameEnv
+        self._ai_prev_missile = False
+        self._ai_prev_bomb = False
         if coop_ai:
             self.ai_player = Player()
             self.ai_player.reset_position((100, SCREEN_HEIGHT // 2 + 80))
@@ -122,6 +126,9 @@ class Game:
                 self.coop_ai = False
                 self.ai_player = None
                 self.ai_error_msg_timer = 5.0
+
+        # Osservazione iniziale per il recorder (accoppiata al primo passo)
+        self._capture_pending_obs()
 
     def _create_life_icon(self) -> pygame.Surface:
         """Piccola icona jet per l'HUD delle vite."""
@@ -211,9 +218,10 @@ class Game:
         return steps
 
     def _handle_events(self):
-        # I flag keydown di missile/bomba per il recorder si azzerano in
-        # _update dopo la registrazione: con il passo fisso un frame può
-        # eseguire 0, 1 o più passi, e il keydown vale per il primo
+        # Missile e bomba qui impostano solo i flag keydown: li applica (e il
+        # recorder li registra) il primo _update successivo, poi si azzerano.
+        # Con il passo fisso un frame può eseguire 0, 1 o più passi, e il
+        # keydown vale per il primo. Anche lo sparo si applica in _update
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -245,23 +253,17 @@ class Game:
                 elif not self.game_over:
                     if event.key == pygame.K_m:
                         self._frame_missile_pressed = True
-                        if self.player.shoot_missile(self.missiles, self.enemies):
-                            self.sound.play_missile()
                     elif event.key == pygame.K_b:
                         self._frame_bomb_pressed = True
-                        self._use_bomb(self.player)
-
-        if not self.game_over:
-            keys = pygame.key.get_pressed()
-            if keys[pygame.K_SPACE]:
-                if self.player.shoot(self.bullets):
-                    self.sound.play_shoot()
 
     def _update(self, dt: float):
-        # Registra frame per AI (prima di aggiornare lo stato)
+        # Registra frame per AI: osservazione di fine passo precedente
+        # (_pending_obs) e azioni di questo passo, come la coppia di GameEnv
         if self.recorder is not None:
             self.recorder.record_frame(self)
         # Keydown missile/bomba consumati: valgono solo per questo passo
+        missile_pressed = self._frame_missile_pressed
+        bomb_pressed = self._frame_bomb_pressed
         self._frame_missile_pressed = False
         self._frame_bomb_pressed = False
 
@@ -275,6 +277,15 @@ class Game:
 
         self.background.update(dt, lm.level)
         self.player.update(dt)
+        # Sparo, missile e bomba dell'umano dopo il movimento, nell'ordine di
+        # GameEnv._apply_actions (e della nave AI)
+        if pygame.key.get_pressed()[pygame.K_SPACE]:
+            if self.player.shoot(self.bullets):
+                self.sound.play_shoot()
+        if missile_pressed and self.player.shoot_missile(self.missiles, self.enemies):
+            self.sound.play_missile()
+        if bomb_pressed:
+            self._use_bomb(self.player)
         self.bullets.update(dt)
         # Snapshot: un missile esaurito o uscito dallo schermo lascia il gruppo
         # dentro update(), ma le kill del suo ultimo frame vanno contate
@@ -415,6 +426,19 @@ class Game:
         elif self.ai_error_msg_timer > 0:
             # Timer avviso genoma AI non valido
             self.ai_error_msg_timer -= dt / FPS
+
+        # Osservazione di fine passo: il recorder la accoppia alle azioni del
+        # passo successivo
+        self._capture_pending_obs()
+
+    def _capture_pending_obs(self):
+        """Salva l'osservazione corrente per il recorder (solo se attivo).
+
+        Chiamata a fine _update, in __init__ e in _restart: la coppia
+        registrata e' (stato prima delle azioni, azioni), come in GameEnv.
+        """
+        if self.recorder is not None:
+            self._pending_obs = self.recorder.observe(self)
 
     def _play_hit_sound(self):
         """Suono differenziato: scudo assorbimento / scudo rotto / vita persa."""
@@ -888,13 +912,17 @@ class Game:
         if actions['shoot']:
             self.ai_player.shoot(self.ai_bullets)
 
-        # Missile
-        if actions['missile']:
+        # Missile e bomba sul fronte di salita dell'output, come in GameEnv
+        missile = actions['missile']
+        if missile and not self._ai_prev_missile:
             self.ai_player.shoot_missile(self.ai_missiles, self.enemies)
+        self._ai_prev_missile = missile
 
         # Bomba (controllata dall'AI): stesse regole della bomba umana
-        if actions.get('bomb', False) and self.ai_player.bombs > 0:
+        bomb = actions.get('bomb', False)
+        if bomb and not self._ai_prev_bomb and self.ai_player.bombs > 0:
             self._use_bomb(self.ai_player)
+        self._ai_prev_bomb = bomb
 
     def _update_ai(self, dt):
         """Nave AI, fine passo: proiettili, missili, power-up e collisioni."""
@@ -1018,6 +1046,10 @@ class Game:
         self.game_over_phase = 0
         self.player_name = ""
         self.cursor_blink = 0
+        self._frame_missile_pressed = False
+        self._frame_bomb_pressed = False
+        self._ai_prev_missile = False
+        self._ai_prev_bomb = False
         now = pygame.time.get_ticks()
         self.last_enemy_spawn = now
         self.last_asteroid_spawn = now
@@ -1040,3 +1072,6 @@ class Game:
             self.ai_bullets.empty()
             self.ai_missiles.empty()
             self.ai_dead_msg_timer = 0.0
+
+        # Osservazione iniziale della nuova partita per il recorder
+        self._capture_pending_obs()

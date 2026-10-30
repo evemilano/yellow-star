@@ -73,7 +73,12 @@ class PowerUp(pygame.sprite.Sprite):
         # la quota non cambia (comportamento storico, lasciato così)
         self._float_tick += 0.1
         self.rect.y += int(math.sin(self._float_tick) * 0.8)
-        # Clampa verticalmente
-        self.rect.clamp_ip(pygame.Rect(0, 0, 9999, SCREEN_HEIGHT))
+        # Clamp solo verticale: in orizzontale il power-up esce a sinistra e
+        # sparisce come MissilePowerUp (un clamp_ip su Rect(0, 0, 9999, H)
+        # lo fermerebbe anche a x=0, dove resterebbe per sempre)
+        if self.rect.top < 0:
+            self.rect.top = 0
+        elif self.rect.bottom > SCREEN_HEIGHT:
+            self.rect.bottom = SCREEN_HEIGHT
         if self.rect.right < 0:
             self.kill()

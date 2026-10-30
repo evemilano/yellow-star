@@ -15,6 +15,12 @@ from src.game_env import build_observation
 AI_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai")
 SESSIONS_DIR = os.path.join(AI_DIR, "human_sessions")
 
+# Versione del formato delle sessioni ('version' in session_data). Le sessioni
+# senza campo sono della versione 1: osservazione presa dopo sparo, missile e
+# bomba del frame e, con tasti opposti premuti, azione registrata opposta al
+# movimento reale. Dalla 2 la coppia (obs, azione) e' quella di GameEnv.
+SESSION_VERSION = 2
+
 
 class HumanRecorder:
     """Registra coppie (osservazione, azione) durante il gioco umano."""
@@ -25,12 +31,21 @@ class HumanRecorder:
     def record_frame(self, game):
         """Registra un singolo frame della sessione umana.
 
-        Estrae l'osservazione dallo stato del gioco e le azioni
-        dai tasti premuti + flag keydown per missile/bomba.
+        Accoppia l'osservazione di fine passo precedente (game._pending_obs,
+        presa prima di qualsiasi azione di questo passo) alle azioni del passo:
+        tasti premuti + flag keydown per missile/bomba. E' la stessa coppia
+        che vede la rete in GameEnv (obs dello step precedente, poi azione).
         """
-        obs = self._get_observation(game)
+        obs = getattr(game, '_pending_obs', None)
+        if obs is None:
+            obs = self.observe(game)
         actions = self._get_actions_from_keys(game)
         self.frames.append((obs, actions))
+
+    @staticmethod
+    def observe(game):
+        """Osservazione dello stato corrente (vettore a 52 valori)."""
+        return HumanRecorder._get_observation(game)
 
     @staticmethod
     def _get_observation(game):
@@ -46,19 +61,21 @@ class HumanRecorder:
 
         Missile e bomba sono eventi keydown, non held keys,
         quindi li leggiamo dai flag settati in Game._handle_events().
+        Con tasti opposti premuti vale la stessa precedenza di Player.update
+        (vincono giu' e destra), cosi' l'azione coincide con il movimento.
         """
         keys = pygame.key.get_pressed()
 
         vertical = 0
         if keys[pygame.K_UP]:
             vertical = -1
-        elif keys[pygame.K_DOWN]:
+        if keys[pygame.K_DOWN]:
             vertical = 1
 
         horizontal = 0
         if keys[pygame.K_LEFT]:
             horizontal = -1
-        elif keys[pygame.K_RIGHT]:
+        if keys[pygame.K_RIGHT]:
             horizontal = 1
 
         return {
@@ -81,6 +98,7 @@ class HumanRecorder:
             'score': score,
             'num_frames': len(self.frames),
             'timestamp': time.time(),
+            'version': SESSION_VERSION,
         }
 
         filename = f"session_{int(time.time())}.pkl"
