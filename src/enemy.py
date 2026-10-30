@@ -43,6 +43,9 @@ class Enemy(pygame.sprite.Sprite):
         smin = speed_min if speed_min is not None else ENEMY_SPEED_MIN
         smax = speed_max if speed_max is not None else ENEMY_SPEED_MAX
         self.speed = random.uniform(smin, smax)
+        # Resto sub-pixel del movimento: il rect avanza di round(), quindi la
+        # velocità effettiva è self.speed (quella osservata), non int(speed)
+        self._sub_x = 0.0
 
         # Stato sparo
         self.shoot_type = shoot_type
@@ -76,7 +79,10 @@ class Enemy(pygame.sprite.Sprite):
                 self.enemy_bullets.add(EnemyBullet(cx, cy, 180 + a_offset))
 
     def update(self, dt: float):
-        self.rect.x -= int(self.speed * dt)
+        mx = self._sub_x - self.speed * dt
+        step = round(mx)
+        self._sub_x = mx - step
+        self.rect.x += step
         if self.rect.right < 0:
             self.kill()
             return

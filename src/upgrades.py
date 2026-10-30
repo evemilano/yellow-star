@@ -47,19 +47,24 @@ class UpgradeManager:
 
     @property
     def shoot_delay(self) -> int:
-        """Delay tra un colpo e l'altro in ms."""
+        """Delay tra un colpo e l'altro in ms.
+
+        Riduzione persistente, mai peggiorata salendo di livello:
+        base a lv0, -15% (212 ms) da lv1 a lv9, -30% (175 ms) a lv10.
+        """
         lv = self.levels["weapon"]
         base = PLAYER_SHOOT_DELAY
         if lv >= 10:
             return int(base * 0.70)  # -30%
-        elif lv % 2 == 1:  # livelli dispari
+        elif lv >= 1:
             return int(base * 0.85)  # -15%
         return base
 
     def get_bullet_offsets(self) -> list[int]:
         """Lista di offset Y per i proiettili (rispetto al centro del player).
 
-        Livelli pari aggiungono proiettili, dispari aumentano cadenza.
+        Il numero di proiettili cresce di 1 ogni 2 livelli (bullet_count, max 5);
+        la cadenza dipende da shoot_delay.
         """
         n = self.bullet_count
         if n == 1:

@@ -39,10 +39,12 @@ Il training si avvia solo dal menu (non c'è CLI); ESC o chiusura finestra lo in
 `main.py` → `MainMenu` → `Game` (play / coop) oppure `NeatTrainer.train(headless=...)`. Gli import dei moduli pesanti sono lazy dentro `main()`; il guard `if __name__ == "__main__"` è necessario per il `multiprocessing.Pool` su Windows (spawn).
 
 **Due implementazioni parallele del game loop** — punto critico:
-- `src/game.py` `Game._update()`: gioco reale, tempo da `pygame.time.get_ticks()`, `dt` normalizzato su `FPS`, audio, HUD, leaderboard, coop AI.
+- `src/game.py` `Game._update()`: gioco reale, timer da `pygame.time.get_ticks()` reale, audio, HUD, leaderboard, coop AI. `Game.run()` è a passo fisso come GameEnv: accumula il tempo di `clock.tick` e chiama `_update(1.0)` ogni `1000/FPS` ms (`_sim_steps`, max `MAX_SIM_STEPS = 5` passi per frame, l'eccesso si scarta), poi un solo `_draw`; esce sempre con `stop_music()`.
 - `src/game_env.py` `GameEnv._update()`: replica *a mano* la stessa logica per il training (`reset(seed)` / `step(actions) -> (obs, reward, done)`), senza audio/HUD, rendering opzionale.
 
 Ogni modifica alle regole di gioco (spawn, collisioni, power-up, bombe, livelli) va riportata in **entrambi** i file, altrimenti l'AI si allena su un gioco diverso da quello giocato. Le collisioni proiettili×bersagli usano `groupcollide_fast` (in `game_env.py`, stessa semantica di `pygame.sprite.groupcollide`), condivisa dai due loop. Le entità (`player.py`, `enemy.py`, `asteroid.py`, `missile.py`, `powerup.py`, `upgrades.py`, `level.py`...) sono condivise.
+
+**Movimento sub-pixel**: le entità non troncano `speed*dt`: tengono il resto frazionario in `_sub_x`/`_sub_y` (|resto| ≤ 0.5) e spostano il rect di `round()`. Il rect resta la posizione di riferimento, quindi clamp, cambio sprite e riposizionamenti esterni non richiedono risincronizzazioni. Il movimento del player è solo in `Player.move()` (umano, `GameEnv._apply_actions`, AI coop); per reset/restart usare `Player.reset_position()`, che azzera il resto. I punti dei missili si contano su uno snapshot del gruppo preso prima di `missiles.update()` (Game, `_update_ai`, GameEnv): un missile esaurito o fuori schermo esce dal gruppo dentro `update()`.
 
 **Tempo virtuale deterministico**: `GameEnv.step()` fa monkey-patch di `pygame.time.get_ticks` con `frame_count * (1000/FPS)` per la durata del frame e lo ripristina nel `finally`. Le entità leggono il tempo solo via `pygame.time.get_ticks()` (cooldown di sparo, invincibilità, fire delay nemici): nel codice delle entità non usare altre sorgenti di tempo. Il seed per genoma è `genome.key + generation * 10000`.
 
@@ -59,4 +61,4 @@ Ogni modifica alle regole di gioco (spawn, collisioni, power-up, bombe, livelli)
 
 ## Stato persistente versionato
 
-`ai/neat-checkpoint-*`, `ai/best_genome.pkl`, `ai/human_sessions/*.pkl` e `scores.json` sono **committati di proposito** (training portato tra PC). Giocare o allenare li modifica/crea/cancella (rotazione a 2 checkpoint e a 20 sessioni): non ripulirli né rigenerarli senza richiesta. La modalità coop richiede `ai/best_genome.pkl`. Il training riprende automaticamente dal checkpoint con generazione più alta.
+`ai/neat-checkpoint-*`, `ai/best_genome.pkl`, `ai/human_sessions/*.pkl` e `scores.json` sono **committati di proposito** (training portato tra PC). Giocare o allenare li modifica/crea/cancella (rotazione a 2 checkpoint e a 20 sessioni): non ripulirli né rigenerarli senza richiesta. `scores.py` scrive `scores.json` in modo atomico (`.tmp` + `os.replace`); se il file non è leggibile come JSON lo rinomina in `scores.json.bak` prima di salvare. La modalità coop richiede `ai/best_genome.pkl`. Il training riprende automaticamente dal checkpoint con generazione più alta.

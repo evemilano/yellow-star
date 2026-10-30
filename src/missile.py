@@ -25,6 +25,7 @@ class MissilePowerUp(pygame.sprite.Sprite):
             )
         )
         self.speed = MISSILE_POWERUP_SPEED
+        self._sub_x = 0.0  # resto sub-pixel del movimento (niente troncamento)
         self._float_tick = 0
 
     def _create_sprite(self) -> pygame.Surface:
@@ -83,8 +84,12 @@ class MissilePowerUp(pygame.sprite.Sprite):
         return surf
 
     def update(self, dt: float):
-        self.rect.x -= int(self.speed * dt)
-        # Leggero fluttuamento verticale
+        mx = self._sub_x - self.speed * dt
+        step = round(mx)
+        self._sub_x = mx - step
+        self.rect.x += step
+        # Leggero fluttuamento verticale: int(sin * 0.5) vale sempre 0, quindi
+        # di fatto la quota non cambia (comportamento storico, lasciato così)
         self._float_tick += 0.1
         import math
         self.rect.y += int(math.sin(self._float_tick) * 0.5)
@@ -105,6 +110,7 @@ class Missile(pygame.sprite.Sprite):
         self.image = Missile._sprite_cache
         self.rect = self.image.get_rect(center=(x, y))
         self.speed = MISSILE_SPEED
+        self._sub_x = 0.0  # resto sub-pixel del movimento (niente troncamento)
         self.kills_left = MISSILE_KILL_COUNT
         self.enemies = enemies
         self.total_kills = 0
@@ -149,7 +155,10 @@ class Missile(pygame.sprite.Sprite):
         return surf
 
     def update(self, dt: float):
-        self.rect.x += int(self.speed * dt)
+        mx = self._sub_x + self.speed * dt
+        step = round(mx)
+        self._sub_x = mx - step
+        self.rect.x += step
 
         # Controlla collisione con nemici
         if self.kills_left > 0:
@@ -162,5 +171,9 @@ class Missile(pygame.sprite.Sprite):
                 self.kills_left -= 1
                 self.total_kills += 1
 
+        # Il missile esaurito o fuori schermo esce dal gruppo qui: i loop di
+        # punteggio leggono total_kills/kill_positions da uno snapshot del
+        # gruppo preso prima di update(), così le kill di quest'ultimo frame
+        # contano comunque
         if self.kills_left <= 0 or self.rect.left > SCREEN_WIDTH:
             self.kill()

@@ -12,3 +12,5 @@ build/
 *.swp
 *.swo
 *~
+scores.json.tmp
+scores.json.bak

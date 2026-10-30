@@ -25,6 +25,7 @@ class Asteroid(pygame.sprite.Sprite):
         smin = speed_min if speed_min is not None else ASTEROID_SPEED_MIN
         smax = speed_max if speed_max is not None else ASTEROID_SPEED_MAX
         self.speed = random.uniform(smin, smax)
+        self._sub_x = 0.0  # resto sub-pixel del movimento (niente troncamento)
         self.angle = 0
         self.rotation_speed = random.uniform(-2, 2)
 
@@ -57,6 +58,9 @@ class Asteroid(pygame.sprite.Sprite):
         return surf
 
     def update(self, dt: float):
-        self.rect.x -= int(self.speed * dt)
+        mx = self._sub_x - self.speed * dt
+        step = round(mx)
+        self._sub_x = mx - step
+        self.rect.x += step
         if self.rect.right < 0:
             self.kill()

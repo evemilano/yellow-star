@@ -20,7 +20,11 @@ from src.scores import load_scores, save_score
 from src.level import LevelManager
 from src.powerup import PowerUp
 from src.sounds import SoundManager
-from src.game_env import build_observation, groupcollide_fast
+from src.game_env import build_observation, groupcollide_fast, MS_PER_FRAME
+
+# Passo fisso: Game.run esegue _update(1.0) ogni MS_PER_FRAME ms di tempo reale
+# (lo stesso frame virtuale di GameEnv), al massimo MAX_SIM_STEPS volte per frame
+MAX_SIM_STEPS = 5
 
 
 class Game:
@@ -32,6 +36,7 @@ class Game:
         else:
             self.screen = screen
         self.clock = pygame.time.Clock()
+        self._sim_acc_ms = 0.0  # tempo reale non ancora simulato (ms)
         self.running = True
         self.game_over = False
         self.game_over_phase = 0  # 0=gioco, 1=inserimento nome, 2=classifica
@@ -107,7 +112,7 @@ class Game:
         self.ai_dead_msg_timer = 0.0
         if coop_ai:
             self.ai_player = Player()
-            self.ai_player.rect.center = (100, SCREEN_HEIGHT // 2 + 80)
+            self.ai_player.reset_position((100, SCREEN_HEIGHT // 2 + 80))
             self._load_ai_genome()
 
     def _create_life_icon(self) -> pygame.Surface:
@@ -150,16 +155,57 @@ class Game:
 
     def run(self):
         self.sound.start_music()
-        while self.running:
-            dt = self.clock.tick(FPS) / (1000.0 / FPS)
-            self._handle_events()
-            if not self.game_over:
-                self._update(dt)
-            self._draw()
+        self._start_clock()
+        try:
+            while self.running:
+                steps = self._sim_steps(self.clock.tick(FPS))
+                self._handle_events()
+                # Passo fisso come GameEnv: dt = 1.0 per ogni passo
+                for _ in range(steps):
+                    if self.game_over:
+                        break
+                    self._update(1.0)
+                self._draw()
+        finally:
+            # Uscita verso il menu (ESC o chiusura): la BGM non deve restare
+            # in loop sul suo canale nel menu o durante il training
+            self.sound.stop_music()
+
+    def _start_clock(self):
+        """Azzera Clock, accumulatore e timer di spawn all'avvio di run().
+
+        Clock e timer nascono in __init__, prima della generazione dell'audio
+        (alcuni secondi): senza questo reset il primo frame recupererebbe quel
+        tempo (salto di sfondo e player, spawn immediati di nemico e asteroide).
+        """
+        self.clock.tick()
+        self._sim_acc_ms = 0.0
+        now = pygame.time.get_ticks()
+        self.last_enemy_spawn = now
+        self.last_asteroid_spawn = now
+        self.last_powerup_spawn = now
+
+    def _sim_steps(self, elapsed_ms: float) -> int:
+        """Numero di passi _update(1.0) da eseguire per un frame di elapsed_ms.
+
+        Accumula il tempo reale e ne consuma MS_PER_FRAME per passo, così le
+        entità si muovono come nel training (GameEnv usa dt = 1.0 a frame).
+        Oltre MAX_SIM_STEPS passi per frame il tempo in eccesso si scarta
+        (stalli, finestra trascinata): il gioco rallenta invece di far saltare
+        le entità attraverso i bersagli.
+        """
+        self._sim_acc_ms += elapsed_ms
+        steps = int(self._sim_acc_ms // MS_PER_FRAME)
+        if steps > MAX_SIM_STEPS:
+            self._sim_acc_ms = 0.0
+            return MAX_SIM_STEPS
+        self._sim_acc_ms -= steps * MS_PER_FRAME
+        return steps
 
     def _handle_events(self):
-        self._frame_missile_pressed = False
-        self._frame_bomb_pressed = False
+        # I flag keydown di missile/bomba per il recorder si azzerano in
+        # _update dopo la registrazione: con il passo fisso un frame può
+        # eseguire 0, 1 o più passi, e il keydown vale per il primo
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
@@ -207,12 +253,18 @@ class Game:
         # Registra frame per AI (prima di aggiornare lo stato)
         if self.recorder is not None:
             self.recorder.record_frame(self)
+        # Keydown missile/bomba consumati: valgono solo per questo passo
+        self._frame_missile_pressed = False
+        self._frame_bomb_pressed = False
 
         lm = self.level_manager
 
         self.background.update(dt, lm.level)
         self.player.update(dt)
         self.bullets.update(dt)
+        # Snapshot: un missile esaurito o uscito dallo schermo lascia il gruppo
+        # dentro update(), ma le kill del suo ultimo frame vanno contate
+        live_missiles = self.missiles.sprites()
         self.missiles.update(dt)
         self.enemies.update(dt)
         self.asteroids.update(dt)
@@ -269,8 +321,9 @@ class Game:
                 self._try_drop_powerup(enemy.rect.centerx, enemy.rect.centery)
                 self.sound.play_explosion()
 
-        # Punti + esplosioni dai missili (150 punti per kill da missile)
-        for missile in self.missiles:
+        # Punti + esplosioni dai missili (150 punti per kill da missile),
+        # anche quelli usciti dal gruppo in questo frame
+        for missile in live_missiles:
             if missile.total_kills > 0:
                 self.score += missile.total_kills * 150
                 missile.total_kills = 0
@@ -302,6 +355,10 @@ class Game:
         # Campo protettivo da bomba lv10
         bomb_field_active = now < self.bomb_field_until
 
+        # Collisioni col giocatore: alla perdita dell'ultima vita si esce
+        # subito (niente altri danni né _update_ai nello stesso frame), come
+        # GameEnv._update
+
         # Collisione giocatore-nemico
         if not self.player.invincible and not bomb_field_active:
             hit_enemy = pygame.sprite.spritecollideany(self.player, self.enemies)
@@ -309,8 +366,8 @@ class Game:
                 hit_enemy.kill()
                 if not self.player.hit():
                     self._trigger_game_over()
-                else:
-                    self._play_hit_sound()
+                    return
+                self._play_hit_sound()
 
         # Collisione giocatore-asteroide
         if not self.player.invincible and not bomb_field_active:
@@ -318,8 +375,8 @@ class Game:
             if hit_ast:
                 if not self.player.hit():
                     self._trigger_game_over()
-                else:
-                    self._play_hit_sound()
+                    return
+                self._play_hit_sound()
 
         # Collisione proiettile nemico → giocatore
         if not self.player.invincible and not bomb_field_active:
@@ -330,8 +387,8 @@ class Game:
                 eb_hit.kill()
                 if not self.player.hit():
                     self._trigger_game_over()
-                else:
-                    self._play_hit_sound()
+                    return
+                self._play_hit_sound()
 
         # Aggiorna AI coop
         if self.coop_ai:
@@ -607,7 +664,9 @@ class Game:
         pygame.display.flip()
 
     def _trigger_game_over(self):
-        """Attiva il game over con suono e pausa musica."""
+        """Attiva il game over con suono e pausa musica (una volta per partita)."""
+        if self.game_over:
+            return
         self.game_over = True
         self.game_over_phase = 1
         self.sound.play_game_over()
@@ -735,13 +794,11 @@ class Game:
         output = self.ai_net(obs)
         actions = self._decode_ai_actions(output)
 
-        # Movimento
+        # Movimento (stessa Player.move di GameEnv._apply_actions)
         speed = self.ai_player.upgrades.player_speed
         dx = actions['horizontal'] * speed
         dy = actions['vertical'] * speed
-        self.ai_player.rect.x += int(dx * dt)
-        self.ai_player.rect.y += int(dy * dt)
-        self.ai_player.rect.clamp_ip(pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.ai_player.move(dx, dy, dt)
 
         # Invincibilita'
         if self.ai_player.invincible:
@@ -777,8 +834,9 @@ class Game:
                         self.explosions.add(Explosion(ast.rect.centerx, ast.rect.centery))
                         ast.kill()
 
-        # Update proiettili e missili AI
+        # Update proiettili e missili AI (snapshot dei missili come in _update)
         self.ai_bullets.update(dt)
+        live_ai_missiles = self.ai_missiles.sprites()
         self.ai_missiles.update(dt)
 
         # Collisioni proiettili AI vs nemici
@@ -790,8 +848,8 @@ class Game:
                 self._try_drop_powerup(enemy.rect.centerx, enemy.rect.centery)
                 self.sound.play_explosion()
 
-        # Punti dai missili AI
-        for missile in self.ai_missiles:
+        # Punti dai missili AI (anche quelli usciti dal gruppo in questo frame)
+        for missile in live_ai_missiles:
             if missile.total_kills > 0:
                 self.score += missile.total_kills * 150
                 missile.total_kills = 0
@@ -862,7 +920,7 @@ class Game:
         self.player.missiles = 0
         self.player.invincible = False
         self.player.visible = True
-        self.player.rect.center = (100, SCREEN_HEIGHT // 2)
+        self.player.reset_position((100, SCREEN_HEIGHT // 2))
         self.player.upgrades.reset()
         self.player._update_sprite(force=True)
         self.player.shield_hp = 0
@@ -897,7 +955,7 @@ class Game:
             self.ai_player.missiles = 0
             self.ai_player.invincible = False
             self.ai_player.visible = True
-            self.ai_player.rect.center = (100, SCREEN_HEIGHT // 2 + 80)
+            self.ai_player.reset_position((100, SCREEN_HEIGHT // 2 + 80))
             self.ai_player.upgrades.reset()
             self.ai_player._update_sprite(force=True)
             self.ai_player.shield_hp = 0

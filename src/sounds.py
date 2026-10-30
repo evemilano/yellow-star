@@ -380,11 +380,43 @@ def _gen_bgm() -> pygame.mixer.Sound:
 #  Sound Manager
 # ═══════════════════════════════════════════════════════════
 
+class _SilentSound:
+    """Sostituto muto di Sound e Channel quando il mixer non è disponibile."""
+
+    def play(self, *args, **kwargs):
+        pass
+
+    def stop(self):
+        pass
+
+    def pause(self):
+        pass
+
+    def unpause(self):
+        pass
+
+    def set_volume(self, *args):
+        pass
+
+
 class SoundManager:
     """Gestisce tutti i suoni del gioco. Genera tutto proceduralmente."""
 
     def __init__(self):
-        pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=1, buffer=512)
+        try:
+            pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=1, buffer=512)
+        except pygame.error:
+            # Nessun dispositivo audio (sessione RDP, driver assente o
+            # occupato): il gioco resta giocabile, senza suoni
+            silent = _SilentSound()
+            self.sfx_shoot = self.sfx_explosion = self.sfx_powerup = silent
+            self.sfx_player_hit = self.sfx_game_over = self.sfx_missile = silent
+            self.sfx_bomb = self.sfx_level_up = silent
+            self.sfx_shield_hit = self.sfx_shield_break = silent
+            self.bgm = silent
+            self._bgm_channel = silent
+            self._music_playing = False
+            return
         pygame.mixer.set_num_channels(16)
 
         # Genera gli effetti

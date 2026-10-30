@@ -24,6 +24,10 @@ class EnemyBullet(pygame.sprite.Sprite):
         rad = math.radians(angle_deg)
         self.vx = math.cos(rad) * ENEMY_BULLET_SPEED
         self.vy = math.sin(rad) * ENEMY_BULLET_SPEED
+        # Resto sub-pixel su entrambi gli assi: il colpo segue davvero
+        # l'angolo e la velocità (vx, vy) riportati nell'osservazione
+        self._sub_x = 0.0
+        self._sub_y = 0.0
 
     def _create_frames(self):
         """3 frame animati: corpo magenta con scia viola tremolante."""
@@ -78,8 +82,14 @@ class EnemyBullet(pygame.sprite.Sprite):
             self.frames.append(surf)
 
     def update(self, dt: float):
-        self.rect.x += int(self.vx * dt)
-        self.rect.y += int(self.vy * dt)
+        mx = self._sub_x + self.vx * dt
+        my = self._sub_y + self.vy * dt
+        sx = round(mx)
+        sy = round(my)
+        self._sub_x = mx - sx
+        self._sub_y = my - sy
+        self.rect.x += sx
+        self.rect.y += sy
 
         self.frame = (self.frame + 1) % 3
         self.image = self.frames[self.frame]

@@ -18,6 +18,7 @@ class Bullet(pygame.sprite.Sprite):
         self.image = self.frames[0]
         self.rect = self.image.get_rect(center=(x, y))
         self.speed = BULLET_SPEED
+        self._sub_x = 0.0  # resto sub-pixel del movimento (niente troncamento)
 
     def _create_frames(self):
         """Crea 3 frame di animazione per la scia tremolante."""
@@ -100,7 +101,10 @@ class Bullet(pygame.sprite.Sprite):
             self.frames.append(surf)
 
     def update(self, dt: float):
-        self.rect.x += int(self.speed * dt)
+        mx = self._sub_x + self.speed * dt
+        step = round(mx)
+        self._sub_x = mx - step
+        self.rect.x += step
         # Anima la scia (cicla tra i 3 frame)
         self.frame = (self.frame + 1) % 3
         self.image = self.frames[self.frame]

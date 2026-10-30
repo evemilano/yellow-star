@@ -132,7 +132,7 @@ Human and a trained AI agent play **simultaneously** on the same screen. Require
 
 After game over: type a name (max 10 characters, `BACKSPACE` to delete), `ENTER` to save it (non-empty name) to the Top 10 leaderboard, then `ENTER` again to restart.
 
-- **Speed**: Base 6 px/frame (at 60 FPS), +10% per engine level up to 2x (12 px/frame)
+- **Speed**: Base 6 px/frame (at 60 FPS), +10% per engine level up to 2x (12 px/frame); fractional speeds are kept with sub-pixel movement, so every engine level is effective
 - **Health**: 3 lives + shield HP (0-5) from shield upgrades; the shield absorbs hits before lives
 - **Invincibility**: 2.0–4.5 seconds after any hit (shield or life): 2 s base, +0.5 s every 2 shield levels
 
@@ -162,7 +162,7 @@ Enemies destroyed by bullets or missiles have a **15% drop chance** for one of 4
 | Type | Color | Icon | Effect |
 |------|-------|------|--------|
 | **Engine** | Green | M | +10% speed per level (max 2x) |
-| **Weapon** | Orange | W | +1 bullet on even levels (max 5), -15% fire delay on odd levels; changes the player ship sprite |
+| **Weapon** | Orange | W | +1 bullet on even levels (max 5); fire delay -15% from level 1, -30% at level 10; changes the player ship sprite |
 | **Shield** | Blue | S | +1 max shield HP every 2 levels (max 5), refills the shield, +invincibility duration |
 | **Bomb** | Purple | B | +1 bomb (capacity +1 every 2 levels, max 5), unlocks effects |
 
@@ -171,12 +171,15 @@ Each category has **10 upgrade levels**. Key milestones:
 **Weapon progression:**
 | Level | Bullets | Fire Delay |
 |-------|---------|-----------|
-| 0 / 1 | 1 | 250 ms / 212 ms (-15%) |
-| 2 / 3 | 2 | 250 ms / 212 ms |
-| 4 / 5 | 3 | 250 ms / 212 ms |
-| 6 / 7 | 4 | 250 ms / 212 ms |
-| 8 / 9 | 5 | 250 ms / 212 ms |
+| 0 | 1 | 250 ms |
+| 1 | 1 | 212 ms (-15%) |
+| 2 / 3 | 2 | 212 ms |
+| 4 / 5 | 3 | 212 ms |
+| 6 / 7 | 4 | 212 ms |
+| 8 / 9 | 5 | 212 ms |
 | 10 | 5 | 175 ms (-30%) |
+
+The fire-delay reduction is persistent: leveling up never slows the fire rate.
 
 **Bomb unlock chain:**
 | Level | Effect |
@@ -190,7 +193,7 @@ Each category has **10 upgrade levels**. Key milestones:
 ### Weapons
 
 - **Bullets**: 12 px/frame, animated 3-frame sprites with flame trail, 1-5 per volley depending on weapon level. Score: 100 pts/kill
-- **Missiles**: Fly straight to the right at 14 px/frame and pierce through up to 5 enemies they touch (no homing). Score: 150 pts/kill. Ammo comes from floating missile pickups that spawn from the right edge every 8 s at level 1; the interval is multiplied by the difficulty factor and capped at 15 s (from level 7)
+- **Missiles**: Fly straight to the right at 14 px/frame and pierce through up to 5 enemies they touch (no homing). Score: 150 pts/kill, with explosion and drop chance, including the kills of the frame in which the missile is spent or leaves the screen. Ammo comes from floating missile pickups that spawn from the right edge every 8 s at level 1; the interval is multiplied by the difficulty factor and capped at 15 s (from level 7)
 - **Bombs**: Instant clear of every enemy currently alive and all enemy bullets (plus the unlocks above). Capacity scales with bomb upgrade level (max 5)
 
 ### Level Progression
@@ -259,6 +262,8 @@ Difficulty affects:
 ```
 
 `GameEnv` (`src/game_env.py`) re-implements the game loop of `Game._update()` (`src/game.py`) as a steppable environment (`reset(seed)` / `step(actions) -> (obs, reward, done)`) without audio, and with rendering (background + minimal HUD) only when created with `render=True`. The entity classes are shared between the two loops.
+
+Both loops advance the simulation in fixed steps of `1000 / FPS` ms with `dt = 1.0`: each `GameEnv.step()` is one step, while `Game.run()` accumulates real time and runs one `_update(1.0)` per elapsed step (at most 5 per rendered frame; after a stall the excess time is dropped, so the game slows down instead of letting entities jump through each other). Entities keep a sub-pixel remainder and move their rect by `round()`, so fractional speeds (enemies, asteroids, angled enemy bullets, engine upgrades) are not truncated: effective speeds match the declared values and are identical in play and in training. Game timers (spawns, cooldowns, invincibility) still use `pygame.time.get_ticks()`: real time in `Game`, virtual time in `GameEnv`.
 
 ### Neural Network I/O
 
@@ -411,7 +416,7 @@ Injection happens inside the evaluation callback, after the generation has been 
 | `ai/neat-checkpoint-{N}` | gzip-compressed pickle | Full NEAT state: generation, config, population, species, random state |
 | `ai/best_genome.pkl` | Pickle | Single best-performing genome (used for Coop mode) |
 | `ai/human_sessions/session_*.pkl` | Pickle | Recorded human (observation, action) frame pairs + final score |
-| `scores.json` | JSON | Top-10 human player leaderboard (`name`, `score`) |
+| `scores.json` | JSON | Top-10 human player leaderboard (`name`, `score`), UTF-8, written atomically (temporary file + `os.replace`). A missing, empty or invalid file reads as an empty leaderboard (malformed entries are skipped); an unparsable file is renamed to `scores.json.bak` before the next save; if the file cannot be written the score is not saved and the game goes on |
 
 Checkpoints are saved every 10 generations by `_RollingCheckpointer`, which deletes all but the 2 most recent (`MAX_CHECKPOINTS = 2`), and are automatically discovered on startup (highest generation loaded for resume). `ai/best_genome.pkl` is overwritten whenever a generation beats the record. These files are committed to the repository so training can continue across machines.
 
@@ -475,7 +480,7 @@ All game constants are defined in [settings.py](settings.py) (NEAT parameters ar
 |----------|-------|-------------|
 | `SCREEN_WIDTH` | 1280 | Window width in pixels |
 | `SCREEN_HEIGHT` | 740 | Window height in pixels |
-| `FPS` | 60 | Target frame rate (also the base of the training virtual clock) |
+| `FPS` | 60 | Target frame rate and simulation step (`1000 / FPS` ms) of both the game and the training virtual clock |
 
 ### Player
 
@@ -533,7 +538,7 @@ All game constants are defined in [settings.py](settings.py) (NEAT parameters ar
 
 ### Procedural Audio Synthesis
 
-The `SoundManager` generates **all audio at runtime** using waveform math (44.1 kHz, 16 mixer channels) — no external audio files are needed. Audio is used only in Play and Coop modes, not during training.
+The `SoundManager` generates **all audio at runtime** using waveform math (44.1 kHz, 16 mixer channels) — no external audio files are needed. Audio is used only in Play and Coop modes, not during training. If the mixer cannot be initialized (no audio device), the game runs muted.
 
 **Sound effects** (10 unique effects):
 
@@ -550,7 +555,7 @@ The `SoundManager` generates **all audio at runtime** using waveform math (44.1 
 | Shield Hit | 0.2s | Metallic harmonics (800+1600+2400 Hz) + 3200 Hz initial ting |
 | Shield Break | 0.5s | Glass noise + 1200→200 Hz sweep |
 
-**Background music**: ~17.5-second loop (8 bars at 110 BPM) in Am (Am-F-C-G, played twice), looping on a dedicated channel and paused at game over. Composed of 5 layers: pulsing bass, chord pad, arpeggio, hi-hat, and kick drum — all synthesized from sine and square waveforms.
+**Background music**: ~17.5-second loop (8 bars at 110 BPM) in Am (Am-F-C-G, played twice), looping on a dedicated channel, paused at game over and stopped when the game returns to the menu. Composed of 5 layers: pulsing bass, chord pad, arpeggio, hi-hat, and kick drum — all synthesized from sine and square waveforms.
 
 ### Parallax Rendering
 

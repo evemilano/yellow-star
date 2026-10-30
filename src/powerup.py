@@ -61,11 +61,16 @@ class PowerUp(pygame.sprite.Sprite):
         self.image = _create_powerup_sprite(self.ptype)
         self.rect = self.image.get_rect(center=(x, y))
         self.speed = POWERUP_SPEED
+        self._sub_x = 0.0  # resto sub-pixel del movimento (niente troncamento)
         self._float_tick = random.uniform(0, math.pi * 2)
 
     def update(self, dt: float):
-        self.rect.x -= int(self.speed * dt)
-        # Fluttuamento verticale
+        mx = self._sub_x - self.speed * dt
+        step = round(mx)
+        self._sub_x = mx - step
+        self.rect.x += step
+        # Fluttuamento verticale: int(sin * 0.8) vale sempre 0, quindi di fatto
+        # la quota non cambia (comportamento storico, lasciato così)
         self._float_tick += 0.1
         self.rect.y += int(math.sin(self._float_tick) * 0.8)
         # Clampa verticalmente

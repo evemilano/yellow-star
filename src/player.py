@@ -9,6 +9,8 @@ from src.missile import Missile
 from src.upgrades import UpgradeManager
 from src.ship_sprites import create_ship_sprite
 
+_SCREEN_RECT = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+
 
 class Player(pygame.sprite.Sprite):
     def __init__(self):
@@ -18,6 +20,11 @@ class Player(pygame.sprite.Sprite):
         self.rect = self.image.get_rect(
             center=(100, SCREEN_HEIGHT // 2)
         )
+        # Resto sub-pixel del movimento (|resto| <= 0.5): posizione reale =
+        # rect + resto, quindi il rect resta la posizione di riferimento e
+        # clamp, cambio sprite e riposizionamenti esterni non lo sfasano
+        self._sub_x = 0.0
+        self._sub_y = 0.0
         self.speed = PLAYER_SPEED
         self.last_shot = 0
         self.shoot_delay = PLAYER_SHOOT_DELAY
@@ -46,6 +53,31 @@ class Player(pygame.sprite.Sprite):
             self.image = create_ship_sprite(new_level)
             self.rect = self.image.get_rect(center=old_center)
 
+    def reset_position(self, center: tuple[int, int]):
+        """Riposiziona la nave (reset, restart) e azzera il resto sub-pixel."""
+        self.rect.center = center
+        self._sub_x = 0.0
+        self._sub_y = 0.0
+
+    def move(self, dx: float, dy: float, dt: float):
+        """Sposta la nave di (dx, dy) * dt px e la tiene dentro lo schermo.
+
+        Unica implementazione del movimento del player, usata da update()
+        (umano), GameEnv._apply_actions (training) e Game._update_ai (nave AI
+        in coop). Lo spostamento non viene troncato: il rect avanza di round()
+        e la frazione resta in _sub_x/_sub_y, quindi la velocità media è
+        esattamente player_speed anche quando non è intera (livelli engine).
+        """
+        mx = dx * dt + self._sub_x
+        my = dy * dt + self._sub_y
+        sx = round(mx)
+        sy = round(my)
+        self._sub_x = mx - sx
+        self._sub_y = my - sy
+        self.rect.x += sx
+        self.rect.y += sy
+        self.rect.clamp_ip(_SCREEN_RECT)
+
     def update(self, dt: float):
         keys = pygame.key.get_pressed()
 
@@ -64,9 +96,7 @@ class Player(pygame.sprite.Sprite):
         if keys[pygame.K_RIGHT]:
             dx = current_speed
 
-        self.rect.x += int(dx * dt)
-        self.rect.y += int(dy * dt)
-        self.rect.clamp_ip(pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT))
+        self.move(dx, dy, dt)
 
         # Gestione invincibilità (lampeggio)
         if self.invincible:

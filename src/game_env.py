@@ -239,7 +239,7 @@ class GameEnv:
         self.player.missiles = 0
         self.player.invincible = False
         self.player.visible = True
-        self.player.rect.center = (100, SCREEN_HEIGHT // 2)
+        self.player.reset_position((100, SCREEN_HEIGHT // 2))
         self.player.upgrades.reset()
         self.player._update_sprite(force=True)
         self.player.shield_hp = 0
@@ -401,9 +401,8 @@ class GameEnv:
         dx = actions.get('horizontal', 0) * speed
         dy = actions.get('vertical', 0) * speed
 
-        self.player.rect.x += int(dx * dt)
-        self.player.rect.y += int(dy * dt)
-        self.player.rect.clamp_ip(pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT))
+        # Stesso movimento (sub-pixel + clamp) dell'umano e dell'AI in coop
+        self.player.move(dx, dy, dt)
 
         # Gestione invincibilita'
         if self.player.invincible:
@@ -445,6 +444,9 @@ class GameEnv:
 
         # Update sprite (NON player.update perche' gia' gestito in _apply_actions)
         self.bullets.update(dt)
+        # Snapshot: un missile esaurito o uscito dallo schermo lascia il gruppo
+        # dentro update(), ma le kill del suo ultimo frame vanno contate
+        live_missiles = self.missiles.sprites()
         self.missiles.update(dt)
         # Traccia nemici/asteroidi che escono dallo schermo (schivate)
         enemies_before = len(self.enemies)
@@ -506,8 +508,8 @@ class GameEnv:
                 self.explosions.add(Explosion(enemy.rect.centerx, enemy.rect.centery))
                 self._try_drop_powerup(enemy.rect.centerx, enemy.rect.centery)
 
-        # Punti dai missili
-        for missile in self.missiles:
+        # Punti dai missili (anche quelli usciti dal gruppo in questo frame)
+        for missile in live_missiles:
             if missile.total_kills > 0:
                 self.score += missile.total_kills * 150
                 missile.total_kills = 0
