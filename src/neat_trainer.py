@@ -43,9 +43,11 @@ DASHBOARD_AUTO_OPEN = True  # apre la dashboard nel browser all'avvio del traini
 
 # Durate in secondi di gioco, convertite in frame con settings.FPS (GameEnv
 # avanza di 1000/FPS ms a ogni step)
-MAX_EPISODE_SECONDS = 180  # 3 minuti
+# 5 minuti (180 s fino alla fitness v6: con l'osservazione v2 i migliori
+# arrivavano a 165-171 s e dalla gen 50 la popolazione non migliorava piu')
+MAX_EPISODE_SECONDS = 300
 MIN_EPISODE_SECONDS = 30   # alla generazione 0, poi cresce fino a MAX in 50 gen
-MAX_FRAMES_PER_EPISODE = int(MAX_EPISODE_SECONDS * FPS)  # 10800 a 60 FPS
+MAX_FRAMES_PER_EPISODE = int(MAX_EPISODE_SECONDS * FPS)  # 18000 a 60 FPS
 MIN_FRAMES_PER_EPISODE = int(MIN_EPISODE_SECONDS * FPS)  # 1800 a 60 FPS
 
 # Velocita' di rendering durante il training visuale
@@ -88,7 +90,7 @@ IMITATION_WEIGHT_CAP = 4.0           # peso = min(tetto, ln(1 + score / 1000))
 # salvato con un'altra versione non e' confrontabile e viene ricalcolato;
 # riprendendo un checkpoint di un'altra versione si azzera lo storico di
 # fitness delle specie (vedi NeatTrainer._reset_species_history)
-FITNESS_VERSION = 6
+FITNESS_VERSION = 7
 
 # Validazione del best in due fasi, su episodi interi (MAX_FRAMES_PER_EPISODE,
 # niente early stop, niente imitation) con seed fissi fuori dalla serie del
@@ -1240,7 +1242,7 @@ class NeatTrainer:
 
     def _get_max_frames(self):
         """Frame massimi adattivi: piu' generazioni = piu' tempo concesso."""
-        # Cresce da MIN a MAX (30 s -> 3 min di gioco) in 50 generazioni
+        # Cresce da MIN a MAX (30 s -> 5 min di gioco) in 50 generazioni
         t = min(1.0, self.generation / 50.0)
         return int(MIN_FRAMES_PER_EPISODE + t * (MAX_FRAMES_PER_EPISODE - MIN_FRAMES_PER_EPISODE))
 

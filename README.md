@@ -325,7 +325,7 @@ fitness = enemies_killed × 50          # bullet kills
         - shots_fired × 0.01
 ```
 
-`FITNESS_VERSION` (currently 5) identifies this formula together with the `GameEnv` rules and the validation suites; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
+`FITNESS_VERSION` (currently 7: version 6 is this formula with observation version 2, version 7 raised the episode cap from 180 s to 300 s) identifies this formula together with the `GameEnv` rules and the validation suites; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
 
 How the counters are measured in `GameEnv`:
 - **Kills**: `enemies_killed` counts bullet kills, `missile_kills` the kills of every missile (counted on the snapshot taken before `missiles.update()`, so the kills of the frame in which a missile is spent or leaves the screen are included), `bomb_kills` the enemies cleared by a bomb.
@@ -393,12 +393,14 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
       - visual: serial, in-process, rendering 1 frame out of 4
       - Each evaluation: compile the genome's FeedForwardNetwork into a generated Python function
         (same outputs as neat's activate(), about 2x faster) → run the GameEnv episodes
-      - Episode length cap: 30 s → 180 s of game time (1800 → 10800 frames at FPS = 60),
-        linear over the first 50 generations
+      - Episode length cap: 30 s → 300 s of game time (1800 → 18000 frames at FPS = 60),
+        linear over the first 50 generations (180 s up to fitness version 6: with observation
+        version 2 the best genomes survived 165-171 s and the population score stopped
+        improving once the cap was reached, at generation 50)
       - Virtual time system ensures deterministic evaluation
         (pygame.time.get_ticks patched to frame_count × 1000 / FPS, ≈16.7 ms per frame)
    b. Apply imitation learning bonus (from gen 10; headless: computed in the workers)
-   c. Validation in two stages, full episodes (10800 frames, no early termination, no imitation):
+   c. Validation in two stages, full episodes (18000 frames, no early termination, no imitation):
       - selection: the 5 genomes with the highest game fitness (without imitation) play the
         10 fixed VALIDATION_SEEDS
       - confirmation: if the best selection mean beats the record, that genome plays the 40
@@ -413,7 +415,7 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
 
 **Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy` and a 1×1 display for headless Pygame operation, receives the imitation samples and the human action frequencies through the pool initializer, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation and validation episodes are distributed via `pool.imap_unordered()`; the summary screen is redrawn (and `ESC`/`D` polled) every 5 completed genomes and after every validation episode.
 
-**Cost** (8-core machine, 7 workers, measured on the checkpoint-80 population): about 150 worker-µs per game frame; a generation of 200 genomes × 2 episodes took ~13 s plus ~5 s of validation while genomes die early (~1500 frames per episode), and would take ~95 s plus up to ~12 s of validation if every episode reached the 180 s cap. With 4 episodes per genome the evaluation time doubles; a confirmation (40 full episodes) adds roughly 8 s to the generations that need one.
+**Cost** (8-core machine, 7 workers, measured on the checkpoint-80 population): about 150 worker-µs per game frame; a generation of 200 genomes × 2 episodes took ~13 s plus ~5 s of validation while genomes die early (~1500 frames per episode), and would take ~95 s plus up to ~12 s of validation if every episode reached the 180 s cap. With 4 episodes per genome the evaluation time doubles; a confirmation (40 full episodes) adds roughly 8 s to the generations that need one. With observation version 2 and the 180 s cap, a generation took ~200 s from generation 50 on (most of the top genomes reached the cap); the 300 s cap makes the late generations longer, in proportion to how long the genomes survive.
 
 ### Training Dashboard
 
