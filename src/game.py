@@ -72,9 +72,11 @@ class Game:
         self.font = pygame.font.Font(None, 36)
         self.font_big = pygame.font.Font(None, 72)
 
-        # Bomba: freeze spawn e campo protettivo
-        self.bomb_freeze_until = 0  # timestamp ms
-        self.bomb_field_until = 0   # timestamp ms
+        # Bomba: freeze spawn (globale) e campo protettivo (per nave: protegge
+        # solo chi ha lanciato la bomba, come in GameEnv)
+        self.bomb_freeze_until = 0     # timestamp ms
+        self.bomb_field_until = 0      # timestamp ms, campo dell'umano
+        self.ai_bomb_field_until = 0   # timestamp ms, campo della nave AI
 
         # Notifica raccolta power-up (testo, colore, timer)
         self.powerup_msg = ""
@@ -110,10 +112,16 @@ class Game:
         self.ai_bullets = pygame.sprite.Group()
         self.ai_missiles = pygame.sprite.Group()
         self.ai_dead_msg_timer = 0.0
+        self.ai_error_msg_timer = 0.0
         if coop_ai:
             self.ai_player = Player()
             self.ai_player.reset_position((100, SCREEN_HEIGHT // 2 + 80))
-            self._load_ai_genome()
+            if not self._load_ai_genome():
+                # Genoma illeggibile o incompatibile: si gioca senza nave AI
+                # (come dopo "AI eliminata!"), con un avviso a schermo
+                self.coop_ai = False
+                self.ai_player = None
+                self.ai_error_msg_timer = 5.0
 
     def _create_life_icon(self) -> pygame.Surface:
         """Piccola icona jet per l'HUD delle vite."""
@@ -241,7 +249,7 @@ class Game:
                             self.sound.play_missile()
                     elif event.key == pygame.K_b:
                         self._frame_bomb_pressed = True
-                        self._use_bomb()
+                        self._use_bomb(self.player)
 
         if not self.game_over:
             keys = pygame.key.get_pressed()
@@ -256,6 +264,12 @@ class Game:
         # Keydown missile/bomba consumati: valgono solo per questo passo
         self._frame_missile_pressed = False
         self._frame_bomb_pressed = False
+
+        # Nave AI: decide sullo stato di fine passo precedente e agisce prima
+        # che il mondo si muova, come in GameEnv.step (_apply_actions, poi
+        # _update); proiettili e collisioni AI in _update_ai, a fine passo
+        if self.coop_ai:
+            self._update_ai_actions(dt)
 
         lm = self.level_manager
 
@@ -287,6 +301,8 @@ class Game:
                 shoot_delay=shoot_delay,
                 enemy_bullets=self.enemy_bullets,
                 player=self.player,
+                # Coop: gli 'aimed' mirano alla nave viva più vicina
+                target_fn=self._aimed_target if self.coop_ai else None,
             ))
 
         # Spawn asteroidi
@@ -352,7 +368,7 @@ class Game:
         if lm.check_levelup(self.score):
             self.sound.play_level_up()
 
-        # Campo protettivo da bomba lv10
+        # Campo protettivo da bomba lv10 (solo quello lanciato dall'umano)
         bomb_field_active = now < self.bomb_field_until
 
         # Collisioni col giocatore: alla perdita dell'ultima vita si esce
@@ -396,6 +412,9 @@ class Game:
             # Timer messaggio AI eliminata
             if self.ai_dead_msg_timer > 0:
                 self.ai_dead_msg_timer -= dt / FPS
+        elif self.ai_error_msg_timer > 0:
+            # Timer avviso genoma AI non valido
+            self.ai_error_msg_timer -= dt / FPS
 
     def _play_hit_sound(self):
         """Suono differenziato: scudo assorbimento / scudo rotto / vita persa."""
@@ -562,12 +581,18 @@ class Game:
                                                      SCREEN_HEIGHT // 2 + 30))
             )
 
-        # Campo protettivo bomba (alone viola)
+        # Campo protettivo bomba (alone viola) attorno alla nave che l'ha lanciata
         now_draw = pygame.time.get_ticks()
         if now_draw < self.bomb_field_until:
             self.screen.blit(
                 self._bomb_field_surf,
                 self._bomb_field_surf.get_rect(center=self.player.rect.center)
+            )
+        if (self.coop_ai and self.ai_player.lives > 0
+                and now_draw < self.ai_bomb_field_until):
+            self.screen.blit(
+                self._bomb_field_surf,
+                self._bomb_field_surf.get_rect(center=self.ai_player.rect.center)
             )
 
         # Notifica LEVEL UP
@@ -596,6 +621,13 @@ class Game:
                 msg = self.font.render("AI eliminata!", True, (255, 100, 100))
                 msg.set_alpha(alpha)
                 self.screen.blit(msg, msg.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 40)))
+        elif self.ai_error_msg_timer > 0:
+            # Coop avviata ma genoma AI non caricabile
+            alpha = min(255, int(self.ai_error_msg_timer * 150))
+            msg = self.font.render("Genoma AI non valido: si gioca senza AI",
+                                   True, (255, 100, 100))
+            msg.set_alpha(alpha)
+            self.screen.blit(msg, msg.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT - 40)))
 
         # Game Over
         if self.game_over:
@@ -683,12 +715,17 @@ class Game:
         if random.random() < POWERUP_DROP_CHANCE:
             self.powerups.add(PowerUp(x, y))
 
-    def _use_bomb(self):
-        """Attiva una bomba: distrugge tutto sullo schermo."""
-        if not self.player.use_bomb():
+    def _use_bomb(self, player):
+        """Attiva una bomba di `player` (umano o nave AI): distrugge tutto sullo schermo.
+
+        Stesse regole di GameEnv._use_bomb con gli upgrade di chi la lancia:
+        il freeze degli spawn (lv8+) vale per tutti, il campo protettivo
+        (lv10) protegge solo la nave che ha usato la bomba.
+        """
+        if not player.use_bomb():
             return
         self.sound.play_bomb()
-        up = self.player.upgrades
+        up = player.upgrades
         score_mult = 2 if up.bomb_double_score else 1
 
         # Distruggi tutti i nemici
@@ -712,7 +749,11 @@ class Game:
 
         # Campo protettivo (lv10)
         if up.bomb_shield_field:
-            self.bomb_field_until = pygame.time.get_ticks() + BOMB_FIELD_DURATION
+            field_until = pygame.time.get_ticks() + BOMB_FIELD_DURATION
+            if player is self.ai_player:
+                self.ai_bomb_field_until = field_until
+            else:
+                self.bomb_field_until = field_until
 
     _POWERUP_COLORS = {
         "engine": (80, 220, 80),
@@ -737,19 +778,36 @@ class Game:
 
     # ── AI Coop ──
 
-    def _load_ai_genome(self):
-        """Carica il miglior genoma NEAT per la nave AI."""
+    def _load_ai_genome(self) -> bool:
+        """Carica il miglior genoma NEAT per la nave AI.
+
+        Ritorna False (e stampa l'errore in console) se ai/best_genome.pkl
+        manca, è corrotto o non è compatibile con la config: il menu controlla
+        solo che il file esista, e la coop non deve crashare.
+        """
         import pickle
         import neat
         from src.neat_trainer import CONFIG_PATH, BEST_GENOME_PATH, compile_network
-        config = neat.Config(
-            neat.DefaultGenome, neat.DefaultReproduction,
-            neat.DefaultSpeciesSet, neat.DefaultStagnation, CONFIG_PATH,
-        )
-        with open(BEST_GENOME_PATH, 'rb') as f:
-            genome = pickle.load(f)
-        # Rete compilata: funzione obs -> output (stessi valori di activate)
-        self.ai_net = compile_network(genome, config)
+        try:
+            config = neat.Config(
+                neat.DefaultGenome, neat.DefaultReproduction,
+                neat.DefaultSpeciesSet, neat.DefaultStagnation, CONFIG_PATH,
+            )
+            with open(BEST_GENOME_PATH, 'rb') as f:
+                genome = pickle.load(f)
+            # Rete compilata: funzione obs -> output (stessi valori di activate)
+            net = compile_network(genome, config)
+            # Prova su un'osservazione reale: alcune incompatibilità emergono
+            # solo eseguendo la rete
+            if len(net(self._get_ai_observation())) != config.genome_config.num_outputs:
+                raise ValueError("numero di output diverso dalla config")
+        except Exception as e:
+            # pickle e neat possono sollevare quasi ogni tipo di eccezione
+            # (UnpicklingError, EOFError, AttributeError, KeyError, ...)
+            print(f"Genoma AI non caricabile ({BEST_GENOME_PATH}): {e!r}")
+            return False
+        self.ai_net = net
+        return True
 
     def _get_ai_observation(self):
         """Estrae 52 valori normalizzati per la rete AI (stesso formato di GameEnv)."""
@@ -784,8 +842,23 @@ class Game:
             'bomb': output[4] > 0.5,
         }
 
-    def _update_ai(self, dt):
-        """Aggiorna la nave AI: osservazione, azione, collisioni."""
+    def _aimed_target(self, x, y):
+        """Bersaglio dei nemici 'aimed' in coop: la nave viva più vicina a (x, y).
+
+        Valutato a ogni sparo (non allo spawn): un nemico non mira mai alla
+        nave AI già eliminata.
+        """
+        ships = [self.player]
+        if self.ai_player is not None and self.ai_player.lives > 0:
+            ships.append(self.ai_player)
+        return min(ships, key=lambda p: (p.rect.centerx - x) ** 2 + (p.rect.centery - y) ** 2)
+
+    def _update_ai_actions(self, dt):
+        """Nave AI, inizio passo: osservazione, decisione e azioni.
+
+        Come GameEnv._apply_actions: movimento, invincibilità, sparo, missile
+        e bomba, prima che nemici, asteroidi e proiettili si muovano.
+        """
         if not self.ai_player or self.ai_player.lives <= 0:
             return
 
@@ -819,20 +892,14 @@ class Game:
         if actions['missile']:
             self.ai_player.shoot_missile(self.ai_missiles, self.enemies)
 
-        # Bomba (controllata dall'AI)
+        # Bomba (controllata dall'AI): stesse regole della bomba umana
         if actions.get('bomb', False) and self.ai_player.bombs > 0:
-            if self.ai_player.use_bomb():
-                up = self.ai_player.upgrades
-                score_mult = 2 if up.bomb_double_score else 1
-                for enemy in list(self.enemies):
-                    self.score += 100 * score_mult
-                    self.explosions.add(Explosion(enemy.rect.centerx, enemy.rect.centery))
-                    enemy.kill()
-                self.enemy_bullets.empty()
-                if up.bomb_destroys_asteroids:
-                    for ast in list(self.asteroids):
-                        self.explosions.add(Explosion(ast.rect.centerx, ast.rect.centery))
-                        ast.kill()
+            self._use_bomb(self.ai_player)
+
+    def _update_ai(self, dt):
+        """Nave AI, fine passo: proiettili, missili, power-up e collisioni."""
+        if not self.ai_player or self.ai_player.lives <= 0:
+            return
 
         # Update proiettili e missili AI (snapshot dei missili come in _update)
         self.ai_bullets.update(dt)
@@ -859,6 +926,12 @@ class Game:
                 self.sound.play_explosion()
             missile.kill_positions.clear()
 
+        # Collisioni proiettili AI vs asteroidi, dopo quelle coi nemici come
+        # in GameEnv: un proiettile su nemico e asteroide uccide il nemico
+        ast_hits = groupcollide_fast(self.ai_bullets, self.asteroids, True, False)
+        for bullet in ast_hits:
+            self.explosions.add(Explosion(bullet.rect.centerx, bullet.rect.centery))
+
         # Raccolta power-up da AI
         collected = pygame.sprite.spritecollide(self.ai_player, self.powerups, True)
         for pu in collected:
@@ -868,8 +941,9 @@ class Game:
             elif isinstance(pu, PowerUp):
                 self.ai_player.collect_powerup(pu.ptype)
 
+        # Campo protettivo: solo quello della bomba lanciata dall'AI
         now = pygame.time.get_ticks()
-        bomb_field_active = now < self.bomb_field_until
+        bomb_field_active = now < self.ai_bomb_field_until
 
         # Collisione AI vs nemico
         if not self.ai_player.invincible and not bomb_field_active:
@@ -938,6 +1012,7 @@ class Game:
         self.level_manager.reset()
         self.bomb_freeze_until = 0
         self.bomb_field_until = 0
+        self.ai_bomb_field_until = 0
         self.powerup_msg_timer = 0.0
         self.game_over = False
         self.game_over_phase = 0

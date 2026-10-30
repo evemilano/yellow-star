@@ -114,7 +114,14 @@ Background NEAT training with no game rendering. Uses **multiprocessing** to eva
 Same NEAT training, but genomes are evaluated serially in the main process with live rendering of each genome playing (biome background, minimal HUD, training overlay). Only 1 frame out of 4 is drawn (`TRAIN_RENDER_SKIP = 4`) and there is no frame-rate cap. The population size comes from the NEAT config (150 in `ai/neat_config.txt`, or the value stored in the checkpoint being resumed).
 
 ### 4. Coop AI
-Human and a trained AI agent play **simultaneously** on the same screen. Requires a saved `ai/best_genome.pkl` from prior training (otherwise the menu entry is greyed out and `ENTER` on it does nothing). Both ships share the game world and the score; each ship has its own lives, upgrades, missiles and bombs, and power-ups go to whichever ship picks them up. The AI ship is tinted blue with an "AI" label; aimed enemies always target the human ship. When the AI loses its 3 lives it is removed ("AI eliminata!"); the game ends only when the human loses. The human's actions are recorded for imitation learning as in Play mode.
+Human and a trained AI agent play **simultaneously** on the same screen. Requires a saved `ai/best_genome.pkl` from prior training (otherwise the menu entry is greyed out and `ENTER` on it does nothing). If the file exists but cannot be used (corrupted pickle, or a genome incompatible with `ai/neat_config.txt` and the 52-value observation), the error is printed to the console and the game starts without the AI ship, showing "Genoma AI non valido: si gioca senza AI" for 5 seconds. Both ships share the game world and the score; each ship has its own lives, upgrades, missiles and bombs, and power-ups go to whichever ship picks them up. The AI ship is tinted blue with an "AI" label. When the AI loses its 3 lives it is removed ("AI eliminata!"); the game ends only when the human loses.
+
+The AI ship plays by the same rules it was trained on in `GameEnv`:
+- each step the network sees the state at the end of the previous step, then the ship moves, shoots and uses missile/bomb before enemies, asteroids and bullets move;
+- its bullets are absorbed by asteroids (with a spark), after the bullet-enemy check as for the human;
+- its bombs use its own bomb level: the spawn freeze (lv8+) applies to both ships, the lv10 protective field protects only the ship that dropped the bomb (the human's field no longer protects the AI, and vice versa).
+
+Aimed enemies target the nearest living ship at the moment they fire, so the human is also targeted less often when the AI is closer. Coop games are **not** recorded for imitation learning: the shared score includes the AI's kills and the allied ship does not exist in training.
 
 ---
 
@@ -144,7 +151,7 @@ After game over: type a name (max 10 characters, `BACKSPACE` to delete), `ENTER`
 |------|-------------|------------|----------|
 | **Basic** | 3 | 2200 ms | Straight shot leftward |
 | **Fast** | 4 | 1400 ms | Straight shot, high frequency |
-| **Aimed** | 6 | 2800 ms | Calculates angle to the (human) player |
+| **Aimed** | 6 | 2800 ms | Calculates angle to the player (in Coop: the nearest living ship at each shot) |
 | **Burst** | 10 | 3200 ms | 3-bullet spread (-12, 0, +12 degrees) |
 
 Fire delays are divided by the difficulty factor (`1.12 ^ (level - 1)`) with a floor of 600 ms. Enemies only fire once fully on screen, and the first shot is staggered by an extra 0.5-1.5 s.
@@ -188,7 +195,7 @@ The fire-delay reduction is persistent: leveling up never slows the fire rate.
 | 2+ | Also destroys asteroids |
 | 6+ | Double score on bomb kills (200 pts) |
 | 8+ | Freezes enemy and asteroid spawns for 1 second |
-| 10 | Protective field for 2 seconds (all player collisions ignored) |
+| 10 | Protective field for 2 seconds (all collisions of the ship that dropped the bomb ignored) |
 
 ### Weapons
 
@@ -326,7 +333,7 @@ Fitness is not clipped at 0. `shots_fired` counts volleys, `shots_hit` counts bu
 
 ### Imitation Learning
 
-Human gameplay is recorded during **Play** and **Coop** modes via the `HumanRecorder` class (one frame per game update, human ship only).
+Human gameplay is recorded during **Play** mode only via the `HumanRecorder` class (one frame per game update). Coop games are not recorded; sessions recorded in Coop by earlier versions (indistinguishable, no flag) are still in `ai/human_sessions/` until rotation removes them.
 
 **Recording format** (per frame):
 ```python

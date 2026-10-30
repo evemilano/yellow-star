@@ -26,7 +26,7 @@ def _load_enemy_sprites():
 class Enemy(pygame.sprite.Sprite):
     def __init__(self, speed_min=None, speed_max=None,
                  shoot_type="none", shoot_delay=2000,
-                 enemy_bullets=None, player=None):
+                 enemy_bullets=None, player=None, target_fn=None):
         super().__init__()
         # Carica gli sprite la prima volta
         if not _enemy_sprites:
@@ -52,6 +52,9 @@ class Enemy(pygame.sprite.Sprite):
         self.shoot_delay = shoot_delay
         self.enemy_bullets = enemy_bullets
         self.player = player
+        # Coop: callable (x, y) -> nave da colpire, valutata a ogni sparo
+        # 'aimed'; se None si mira a player (single player e GameEnv)
+        self.target_fn = target_fn
         # Stagger iniziale per evitare muri di proiettili simultanei
         self.last_shot = pygame.time.get_ticks() + random.randint(500, 1500)
 
@@ -66,9 +69,13 @@ class Enemy(pygame.sprite.Sprite):
             self.enemy_bullets.add(EnemyBullet(cx, cy, 180))
 
         elif self.shoot_type == "aimed":
-            if self.player is not None:
-                dx = self.player.rect.centerx - cx
-                dy = self.player.rect.centery - cy
+            if self.target_fn is not None:
+                target = self.target_fn(cx, cy)
+            else:
+                target = self.player
+            if target is not None:
+                dx = target.rect.centerx - cx
+                dy = target.rect.centery - cy
                 angle = math.degrees(math.atan2(dy, dx))
             else:
                 angle = 180

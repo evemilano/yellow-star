@@ -25,7 +25,9 @@ def main():
             NeatTrainer(screen=screen).train(headless=False)
         elif choice == 'coop':
             from src.game import Game
-            Game(screen=screen, record_for_ai=True, coop_ai=True).run()
+            # Coop non registrata per l'imitation: lo score include le kill
+            # dell'AI e l'alleato non esiste in GameEnv
+            Game(screen=screen, coop_ai=True).run()
 
     pygame.quit()
 
