@@ -264,7 +264,7 @@ footer { color: var(--faint); font-size: 12px; text-align: center; padding: 10px
     <section class="card verdict" id="verdict"></section>
     <section class="kpis" id="kpis"></section>
 
-    <div class="section-title"><h2>Progresso</h2><p>La misura affidabile è la validazione: le stesse 10 partite per tutti i genomi.</p></div>
+    <div class="section-title"><h2>Progresso</h2><p>La misura affidabile è il record: la media su partite fisse che non sono servite a scegliere il genoma.</p></div>
     <div class="grid">
       <article class="card span2" id="c-progress"></article>
       <article class="card" id="c-fitness"></article>
@@ -605,13 +605,16 @@ function barChart(host, cfg) {
     svgEl('text', { x: f.m.l - 8, y: sy(v) + 4, class: 'tick', 'text-anchor': 'end' }, svg).textContent = nf(v, decFor(ystep));
   }
   const bw = f.pw / items.length;
+  // con molte barre (es. 40 partite di conferma) etichetta solo 1, 5, 10…
+  const crowd = Math.ceil(items.length * 26 / f.pw);
+  const every = crowd <= 1 ? 1 : crowd <= 2 ? 2 : crowd <= 5 ? 5 : 10;
   const tip = document.createElement('div');
   tip.className = 'tip'; tip.hidden = true; host.appendChild(tip);
   items.forEach((it, i) => {
     const x = f.m.l + i * bw + bw * 0.18, w = bw * 0.64;
     const yA = sy(Math.max(0, it.value)), yB = sy(Math.min(0, it.value));
     const rect = svgEl('rect', { x, y: yA, width: w, height: Math.max(1, yB - yA), rx: 3, fill: it.value < 0 ? cfg.negColor : cfg.color }, svg);
-    svgEl('text', { x: x + w / 2, y: f.H - 8, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = it.label;
+    if (i === 0 || (i + 1) % every === 0) svgEl('text', { x: x + w / 2, y: f.H - 8, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = it.label;
     rect.addEventListener('pointermove', ev => { tip.innerHTML = it.tip; tip.hidden = false; placeTip(host, tip, ev); });
     rect.addEventListener('pointerleave', () => { tip.hidden = true; });
   });
@@ -679,13 +682,17 @@ function markersFor(H) {
   return out;
 }
 const totalKills = s => s ? (s.kills || 0) + (s.missile_kills || 0) + (s.bomb_kills || 0) : null;
+// partite su cui si misura il record: conferma (dalla fitness v4) o validazione unica (prima)
+const recSeeds = st => st.confirmation_seeds ?? st.validation_seeds;
+const speciesTarget = st => st.species_target || [3, 20];
 
 /* ───────── stato live ───────── */
 const PHASES = {
   avvio: 'Avvio del training',
-  rivalutazione: 'Rivalutazione del record sulle partite di validazione',
+  rivalutazione: 'Rivalutazione del record sulle partite di conferma',
   valutazione: 'Valutazione dei genomi',
-  validazione: 'Validazione dei migliori su partite fisse',
+  validazione: 'Selezione dei migliori su partite fisse',
+  conferma: 'Conferma del candidato al record',
   fermo: 'Fermo',
 };
 function renderStatus() {
@@ -757,7 +764,7 @@ function renderVerdict(all, D) {
   const rs = get(D, 'snapshot.record.stats');
   const maxS = D.static.max_episode_s;
   if (rs) {
-    let s = `In partita il record fa in media <b>${nf(rs.score)} punti</b>, sopravvive <b>${nf(rs.surv)} s</b> su un massimo di ${nf(maxS)} e arriva al livello ${nf(rs.level, 1)} (${D.static.validation_seeds} partite fisse, ${nf(rs.lives_lost, 1)} vite perse in media).`;
+    let s = `In partita il record fa in media <b>${nf(rs.score)} punti</b>, sopravvive <b>${nf(rs.surv)} s</b> su un massimo di ${nf(maxS)} e arriva al livello ${nf(rs.level, 1)} (${recSeeds(D.static)} partite fisse, ${nf(rs.lives_lost, 1)} vite perse in media).`;
     if (rs.surv >= 0.9 * maxS) s += ' Arriva quasi sempre alla fine dell\'episodio: per distinguere i genomi migliori serviranno partite più lunghe.';
     items.push({ lv: 'info', t: s });
   }
@@ -768,7 +775,9 @@ function renderVerdict(all, D) {
   // diversita'
   const sp = last.species || {};
   const maxStag = D.static.max_stagnation;
-  if (sp.n <= 2) items.push({ lv: 'warn', t: `Solo ${sp.n} specie: poca diversità. La soglia di compatibilità si abbassa da sola per crearne di nuove.` });
+  const [tMin, tMax] = speciesTarget(D.static);
+  if (sp.n < tMin) items.push({ lv: 'warn', t: `Solo ${sp.n} specie, sotto l'obiettivo di ${tMin}–${tMax}: poca diversità. La soglia di compatibilità si abbassa da sola per crearne di nuove.` });
+  else if (sp.n > tMax) items.push({ lv: 'warn', t: `${sp.n} specie, sopra l'obiettivo di ${tMin}–${tMax}: specie piccole, che perdono facilmente le linee migliori. La soglia di compatibilità si alza da sola per unirle.` });
   else if (sp.max_stag >= maxStag - 3) items.push({ lv: 'warn', t: `${sp.n} specie. Almeno una non migliora da ${sp.max_stag} generazioni: NEAT la elimina a ${maxStag}, salvo le ${D.static.species_elitism} migliori che restano protette.` });
   else items.push({ lv: 'good', t: `${sp.n} specie attive, nessuna vicina all'eliminazione per stallo (al massimo ${sp.max_stag} generazioni senza migliorare su ${maxStag}).` });
   // ritmo
@@ -801,21 +810,21 @@ function renderKpis(all, H, D, C) {
   const cards = [
     {
       l: 'Record di validazione', v: nf(last.record),
-      s: span > 0 ? `<span style="color:${recDelta > 0 ? C.good : C.muted}">${recDelta > 0 ? sgn(recDelta) : 'nessun miglioramento'}</span> nelle ultime ${span} gen` : 'fitness media su 10 partite fisse',
+      s: span > 0 ? `<span style="color:${recDelta > 0 ? C.good : C.muted}">${recDelta > 0 ? sgn(recDelta) : 'nessun miglioramento'}</span> nelle ultime ${span} gen` : `fitness media su ${recSeeds(D.static)} partite fisse`,
       sp: spark(Hv.map(r => r.record), C.record),
-      tip: 'Fitness media del genoma salvato (best_genome.pkl, quello usato in coop) sulle 10 partite di validazione, sempre le stesse. Sale solo quando un genoma gioca davvero meglio: è la misura più affidabile del progresso.',
+      tip: `Fitness media del genoma salvato (best_genome.pkl, quello usato in coop) sulle ${recSeeds(D.static)} partite di conferma, sempre le stesse e diverse da quelle che hanno scelto il candidato. Sale solo quando un genoma gioca davvero meglio: è la misura più affidabile del progresso.`,
     },
     {
       l: 'Punti del record', v: nf(rs.score), u: 'punti',
       s: `${nf(totalKills(rs), 1)} uccisioni a partita`,
       sp: spark(Hv.map(r => get(r, 'record_stats.score')), C.record),
-      tip: 'Score di gioco medio del record nelle 10 partite di validazione: è il punteggio che vedresti giocando con lui.',
+      tip: `Score di gioco medio del record nelle ${recSeeds(D.static)} partite di conferma: è il punteggio che vedresti giocando con lui.`,
     },
     {
       l: 'Sopravvivenza del record', v: nf(rs.surv), u: 's',
       s: `su ${nf(D.static.max_episode_s)} s · livello ${nf(rs.level, 1)}`,
       sp: spark(Hv.map(r => get(r, 'record_stats.surv')), C.record),
-      tip: 'Secondi giocati in media dal record prima di perdere tutte le vite, nelle 10 partite di validazione (massimo: la durata dell\'episodio).',
+      tip: `Secondi giocati in media dal record prima di perdere tutte le vite, nelle ${recSeeds(D.static)} partite di conferma (massimo: la durata dell'episodio).`,
     },
     {
       l: 'Fitness media popolazione', v: nf(fitRoll[fitRoll.length - 1]),
@@ -843,16 +852,19 @@ function renderKpis(all, H, D, C) {
 /* ───────── sezioni ───────── */
 function renderProgress(H, D, C, mk) {
   let c = card('c-progress', 'Progresso reale: record e migliori validati',
-    `Ogni generazione i ${D.static.validation_top_k} genomi con la fitness più alta rigiocano le stesse ${D.static.validation_seeds} partite. I punti blu sono il migliore validato di ogni generazione; la linea verde è il <b>record</b>, il genoma salvato e usato in coop, che sale solo quando un genoma fa meglio su quelle partite. Punti blu vicini alla linea verde: la popolazione si mantiene al livello del record.`,
+    D.static.confirmation_seeds
+      ? `Ogni generazione i ${D.static.validation_top_k} genomi con la fitness più alta rigiocano le stesse ${D.static.validation_seeds} partite di selezione: i punti blu sono il migliore. Se supera il record, gioca altre ${D.static.confirmation_seeds} partite fisse di conferma (punti viola) e diventa il <b>record</b> (linea verde, il genoma salvato e usato in coop) solo se anche lì fa meglio. I punti blu sono ottimisti: il migliore di ${D.static.validation_top_k} su ${D.static.validation_seeds} partite è spesso anche il più fortunato.`
+      : `Ogni generazione i ${D.static.validation_top_k} genomi con la fitness più alta rigiocano le stesse ${D.static.validation_seeds} partite. I punti blu sono il migliore validato di ogni generazione; la linea verde è il <b>record</b>, il genoma salvato e usato in coop.`,
     'La fitness di validazione non include il bonus di imitazione ed è calcolata su partite intere, senza interruzioni anticipate.');
   lineChart(c.body, {
     height: 290, markers: mk,
     series: [
-      { name: 'Migliore validato della generazione', color: C.val, type: 'dots', points: pts(H, r => get(r, 'val.mean')) },
+      { name: 'Migliore della selezione', color: C.val, type: 'dots', points: pts(H, r => get(r, 'val.mean')) },
+      { name: 'Conferma del candidato', color: C.top, type: 'dots', points: pts(H, r => get(r, 'conf.mean')) },
       { name: 'Record', color: C.record, type: 'step', width: 2.6, points: pts(H, r => r.record) },
     ],
   });
-  legend(c.legend, [{ name: 'Record (best_genome.pkl)', color: C.record }, { name: 'Migliore validato della generazione', color: C.val, kind: 'dot' }]);
+  legend(c.legend, [{ name: 'Record (best_genome.pkl)', color: C.record }, { name: 'Migliore della selezione', color: C.val, kind: 'dot' }, { name: 'Conferma del candidato', color: C.top, kind: 'dot' }]);
   const recNow = H.length ? H[H.length - 1].record : null;
   c.slot.innerHTML = isNum(recNow) ? `<span class="badge flat">record ${nf(recNow)}</span>` : '';
 
@@ -873,9 +885,9 @@ function renderProgress(H, D, C, mk) {
   c.slot.innerHTML = trendBadge(trend(H.filter(r => r.fv === D.static.fitness_version).map(r => get(r, 'fit.mean'))));
 
   const rec = get(D, 'snapshot.record');
-  c = card('c-seeds', 'Le partite di validazione del record',
+  c = card('c-seeds', 'Le partite del record',
     'Fitness del record in ciascuna delle partite fisse. Barre molto diverse tra loro significano che il risultato dipende molto dalla partita: un buon genoma deve andare bene in tutte.',
-    'Le partite di validazione usano seed fissi, fuori dalla serie usata in training.');
+    'Le partite di selezione e di conferma usano seed fissi, diversi tra loro e fuori dalla serie usata in training.');
   if (rec && rec.per_seed) {
     const vals = rec.per_seed;
     const m = mean(vals.filter(isNum));
@@ -1081,7 +1093,7 @@ function renderNets(H, D, C, mk) {
 function renderTop(D, C) {
   const snap = D.snapshot;
   const c = card('c-top', 'Classifica dell\'ultima generazione',
-    `Fitness media sulle ${D.static.episodes_per_genome} partite della generazione (bonus di imitazione incluso). Uccisioni: proiettili / missili / bomba. I primi ${D.static.validation_top_k} vengono rigiocati sulle partite di validazione.`);
+    `Fitness media sulle ${D.static.episodes_per_genome} partite della generazione (bonus di imitazione incluso). Uccisioni: proiettili / missili / bomba. I primi ${D.static.validation_top_k} vengono rigiocati sulle partite di selezione.`);
   if (!snap || !snap.top_genomes) return noData(c.body, 'Compare alla fine della prima generazione.');
   $('#top-sub').textContent = `Generazione ${nf(snap.gen)}: i 10 genomi con la fitness più alta (partite con seed ${(snap.seeds || []).join(', ')}).`;
   const recKey = get(D, 'snapshot.record.key');
@@ -1101,10 +1113,12 @@ function renderGuide(D) {
     ['Genoma e rete', 'Un genoma descrive una rete neurale: 52 valori letti dal gioco in ingresso (posizione, nemici, proiettili, power-up…), 5 comandi in uscita (movimento verticale e orizzontale, sparo, missile, bomba).'],
     ['Fitness', 'Il punteggio con cui NEAT sceglie chi si riproduce: somma di premi e penalità (vedi la scomposizione). Non è lo score di gioco, anche se ne segue l\'andamento.'],
     ['Partite di training', `Ogni generazione usa ${s.episodes_per_genome} partite nuove, uguali per tutti i genomi: il confronto tra genomi è equo, ma da una generazione all'altra la difficoltà cambia e i valori oscillano.`],
-    ['Validazione e record', `A fine generazione i ${s.validation_top_k} genomi con la fitness più alta giocano ${s.validation_seeds} partite fisse, intere e senza bonus. Se uno batte il record viene salvato in best_genome.pkl, che è anche il compagno in coop. È la misura più affidabile.`],
+    ['Validazione e record', s.confirmation_seeds
+      ? `A fine generazione i ${s.validation_top_k} genomi con la fitness più alta giocano ${s.validation_seeds} partite fisse di selezione, intere e senza bonus. Se il migliore supera il record, gioca altre ${s.confirmation_seeds} partite fisse di conferma: se anche lì batte il record viene salvato in best_genome.pkl, che è anche il compagno in coop. Il record si misura su partite che non hanno scelto il candidato, quindi non premia la fortuna: è la misura più affidabile.`
+      : `A fine generazione i ${s.validation_top_k} genomi con la fitness più alta giocano ${s.validation_seeds} partite fisse, intere e senza bonus. Se uno batte il record viene salvato in best_genome.pkl, che è anche il compagno in coop.`],
     ['Migliori 10%', 'I genomi con la fitness più alta della generazione: mostrano dove sta arrivando la parte buona della popolazione, meno rumorosa del singolo massimo.'],
     ['Specie', 'Gruppi di reti con struttura simile. Ogni genoma compete soprattutto con la sua specie: così una rete nuova, ancora poco allenata, non viene eliminata subito.'],
-    ['Soglia di compatibilità', 'Quanto due reti possono essere diverse e restare nella stessa specie. Il trainer la regola da solo: la abbassa se le specie sono 2 o meno, la alza se sono più di 20.'],
+    ['Soglia di compatibilità', `Quanto due reti possono essere diverse e restare nella stessa specie. Il trainer la regola da solo per tenere tra ${speciesTarget(s)[0]} e ${speciesTarget(s)[1]} specie: la abbassa se sono meno, la alza se sono di più.`],
     ['Stallo', `Generazioni da quando la fitness media di una specie ha migliorato il suo massimo. A ${s.max_stagnation} la specie viene eliminata, salvo le ${s.species_elitism} migliori.`],
     ['Interruzione anticipata', `In training una partita finisce prima se la nave resta ferma per il ${nf(s.early_stop_idle_pct)}% del tempo o, dalla generazione ${s.early_stop_lives_gen}, dopo ${s.early_stop_lives} vite perse. La durata massima cresce da ${s.min_episode_s} a ${s.max_episode_s} s nelle prime 50 generazioni.`],
     ['Imitazione', `Dalla generazione ${s.imitation_start_gen} ogni genoma riceve fino a ${s.imitation_max_bonus} punti se in situazioni registrate dal giocatore umano sceglie movimenti e sparo simili ai suoi, oltre quanto farebbe a caso.`],
@@ -1113,8 +1127,9 @@ function renderGuide(D) {
   ];
   const params = [
     ['Genomi per generazione', nf(s.pop_size)], ['Processi in parallelo', nf(s.workers)],
-    ['Partite per genoma', nf(s.episodes_per_genome)], ['Partite di validazione', nf(s.validation_seeds)],
-    ['Genomi validati per generazione', nf(s.validation_top_k)], ['Durata massima partita', `${s.min_episode_s} → ${s.max_episode_s} s`],
+    ['Partite per genoma', nf(s.episodes_per_genome)], ['Partite di selezione', nf(s.validation_seeds)],
+    ['Partite di conferma del record', s.confirmation_seeds ? nf(s.confirmation_seeds) : '–'],
+    ['Genomi validati per generazione', nf(s.validation_top_k)], ['Specie obiettivo', `${speciesTarget(s)[0]}–${speciesTarget(s)[1]}`], ['Durata massima partita', `${s.min_episode_s} → ${s.max_episode_s} s`],
     ['Eliminazione per stallo', `${s.max_stagnation} generazioni`], ['Specie protette', nf(s.species_elitism)],
     ['Elitismo per specie', nf(s.elitism)], ['Versione della fitness', 'v' + s.fitness_version],
   ];

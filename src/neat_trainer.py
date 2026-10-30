@@ -54,8 +54,17 @@ TRAIN_RENDER_SKIP = 4  # mostra 1 frame su 4
 HEADLESS_POP_SIZE = 200
 
 # Episodi per genoma: stessi seed per tutti i genomi della generazione
-# (common random numbers), nuovi a ogni generazione; fitness = media
-EPISODES_PER_GENOME = 2
+# (common random numbers), nuovi a ogni generazione; fitness = media.
+# Con 2 la classifica dei migliori era dominata dal caso (ICC 0.58)
+EPISODES_PER_GENOME = 4
+
+# Speciazione: numero di specie che il threshold adattivo cerca di mantenere
+# (_check_and_fix_stagnation), con passo moltiplicativo per generazione
+SPECIES_TARGET_MIN = 5
+SPECIES_TARGET_MAX = 10
+THRESHOLD_STEP = 0.05
+THRESHOLD_MIN = 1.0
+THRESHOLD_MAX = 6.0
 
 # Terminazione anticipata genomi scarsi (check periodico, in secondi di gioco)
 EARLY_STOP_INTERVAL = int(5 * FPS)   # controlla ogni 5 secondi
@@ -76,14 +85,22 @@ IMITATION_WEIGHT_CAP = 4.0           # peso = min(tetto, ln(1 + score / 1000))
 # salvato con un'altra versione non e' confrontabile e viene ricalcolato;
 # riprendendo un checkpoint di un'altra versione si azzera lo storico di
 # fitness delle specie (vedi NeatTrainer._reset_species_history)
-FITNESS_VERSION = 3
+FITNESS_VERSION = 4
 
-# Validazione del best: a fine generazione i VALIDATION_TOP_K genomi con la
-# fitness di gioco piu' alta giocano un episodio intero (MAX_FRAMES_PER_EPISODE,
-# niente early stop, niente imitation) per ogni seed fisso; best_genome.pkl
-# e' il genoma con la media piu' alta, se batte il record
+# Validazione del best in due fasi, su episodi interi (MAX_FRAMES_PER_EPISODE,
+# niente early stop, niente imitation) con seed fissi fuori dalla serie del
+# training:
+# 1. selezione: i VALIDATION_TOP_K genomi con la fitness di gioco piu' alta
+#    giocano i VALIDATION_SEEDS;
+# 2. conferma: il migliore della selezione, se la sua media supera il record,
+#    gioca i CONFIRMATION_SEEDS; best_genome.pkl e' il genoma con la media di
+#    conferma piu' alta. Il record e' misurato su seed che non hanno scelto il
+#    candidato: con una sola suite da 10 seed il record era il massimo di
+#    migliaia di medie rumorose sulle stesse partite (2779 sui 10 seed, 1454
+#    su 30 seed nuovi)
 VALIDATION_TOP_K = 5
-VALIDATION_SEEDS = tuple(range(10 ** 9, 10 ** 9 + 10))  # fuori dalla serie del training
+VALIDATION_SEEDS = tuple(range(10 ** 9, 10 ** 9 + 10))
+CONFIRMATION_SEEDS = tuple(range(10 ** 9 + 1000, 10 ** 9 + 1040))
 
 
 # Componenti di _compute_fitness come li spiega la dashboard: tenerli allineati
@@ -622,8 +639,9 @@ class NeatTrainer:
             CONFIG_PATH,
         )
         self.best_genome = None
-        # Record di validazione: media della suite (VALIDATION_SEEDS) del
-        # genoma in best_genome.pkl, -inf se non ancora stabilito
+        # Record di validazione: media della suite di conferma
+        # (CONFIRMATION_SEEDS) del genoma in best_genome.pkl, -inf se non
+        # ancora stabilito
         self.best_fitness = -math.inf
         self.generation = 0
         self._start_generation = 0  # generazione di partenza della sessione
@@ -654,10 +672,13 @@ class NeatTrainer:
         self._record_info = None
         self._session_start_record = -math.inf
         # Validazione: cache per genome.key (media, statistiche medie, fitness
-        # per seed), valida per tutta la sessione (suite e fitness non
-        # cambiano), e migliore validato dell'ultima generazione (key, media)
+        # per seed) della selezione e della conferma, valide per tutta la
+        # sessione (suite e fitness non cambiano); migliore della selezione e
+        # conferma dell'ultima generazione (key, media), None se non giocata
         self._val_cache = {}
+        self._conf_cache = {}
         self._last_validation = None
+        self._last_confirmation = None
         self._pool = None
 
     def _init_fonts(self):
@@ -897,12 +918,16 @@ class NeatTrainer:
     # ── Validazione e persistenza del best ──
 
     def _validate_top_genomes(self, genomes, game_fitness, config):
-        """Rivaluta i VALIDATION_TOP_K genomi con la fitness di gioco piu' alta
-        sulla suite di validazione e salva il migliore se batte il record.
+        """Validazione in due fasi dei genomi con la fitness di gioco piu' alta.
 
-        I genomi gia' validati in questa sessione (elite riportate identiche
-        alla generazione dopo) escono dalla cache. Ritorna True se nuovo record.
+        Selezione: i VALIDATION_TOP_K migliori giocano i VALIDATION_SEEDS.
+        Conferma: il migliore della selezione, se la sua media supera il
+        record, gioca i CONFIRMATION_SEEDS e viene salvato se la media di
+        conferma batte il record. I genomi gia' giocati in questa sessione
+        (elite riportate identiche alla generazione dopo) escono dalle cache.
+        Ritorna True se nuovo record.
         """
+        self._last_confirmation = None
         if not game_fitness:
             return False
         ranked = sorted(game_fitness, key=lambda i: game_fitness[i], reverse=True)
@@ -911,11 +936,22 @@ class NeatTrainer:
         if todo:
             self._val_cache.update(self._run_validation(todo, config))
         best = max(candidates, key=lambda g: self._val_cache[g.key][0])
-        mean, stats, per_seed = self._val_cache[best.key]
-        self._last_validation = (best.key, mean)
+        screen_mean = self._val_cache[best.key][0]
+        self._last_validation = (best.key, screen_mean)
         print(f"  [Validazione] top-{len(candidates)} ({len(todo)} nuovi): migliore genoma "
-              f"{best.key}, media {mean:.1f} su {len(VALIDATION_SEEDS)} seed "
+              f"{best.key}, media {screen_mean:.1f} su {len(VALIDATION_SEEDS)} seed "
               f"(record {self.best_fitness:.1f})")
+        if screen_mean <= self.best_fitness:
+            return False
+
+        cached = best.key in self._conf_cache
+        if not cached:
+            self._conf_cache.update(self._run_validation(
+                [best], config, phase='conferma', seeds=CONFIRMATION_SEEDS))
+        mean, stats, per_seed = self._conf_cache[best.key]
+        self._last_confirmation = (best.key, mean)
+        print(f"  [Conferma] genoma {best.key}{' (già giocata)' if cached else ''}: "
+              f"media {mean:.1f} su {len(CONFIRMATION_SEEDS)} seed (record {self.best_fitness:.1f})")
         if mean <= self.best_fitness:
             return False
         self.best_fitness = mean
@@ -924,8 +960,8 @@ class NeatTrainer:
         self._save_best_genome(best, mean, per_seed, stats)
         return True
 
-    def _run_validation(self, genomes, config, phase='validazione'):
-        """Gioca la suite di validazione per ogni genoma.
+    def _run_validation(self, genomes, config, phase='validazione', seeds=VALIDATION_SEEDS):
+        """Gioca una suite di validazione (`seeds`) per ogni genoma.
 
         In headless usa il Pool (un task per genoma e seed), nel visuale gira
         nel processo principale senza rendering. Ritorna {key: (media,
@@ -934,7 +970,7 @@ class NeatTrainer:
         mostrata da schermata e dashboard durante la suite.
         """
         max_frames = MAX_FRAMES_PER_EPISODE
-        tasks = [(g.key, g, config, seed, max_frames) for g in genomes for seed in VALIDATION_SEEDS]
+        tasks = [(g.key, g, config, seed, max_frames) for g in genomes for seed in seeds]
         per_key = {g.key: {} for g in genomes}
         if self._pool is not None:
             results = self._pool.imap_unordered(_validation_worker, tasks, chunksize=1)
@@ -957,7 +993,7 @@ class NeatTrainer:
         out = {}
         for key, by_seed in per_key.items():
             # In ordine di seed: la media non dipende dall'ordine di arrivo
-            ordered = [by_seed[s] for s in VALIDATION_SEEDS]
+            ordered = [by_seed[s] for s in seeds]
             fits = [f for f, _ in ordered]
             if any(f is None for f in fits):
                 out[key] = (-math.inf, None, fits)
@@ -972,7 +1008,8 @@ class NeatTrainer:
         un altro genoma o a un'altra versione della fitness/suite, rivaluta
         best_genome.pkl con la suite corrente e riscrive il sidecar (il pkl non
         cambia). Senza best_genome.pkl caricabile il record resta -inf e il
-        primo genoma validato viene salvato.
+        primo genoma confermato viene salvato. La suite del record e' quella di
+        conferma (CONFIRMATION_SEEDS).
         """
         self.best_fitness = -math.inf
         if not os.path.exists(BEST_GENOME_PATH):
@@ -994,10 +1031,11 @@ class NeatTrainer:
             print(f"Record di validazione: {self.best_fitness:.1f} ({BEST_GENOME_META_PATH})")
             return
 
-        print("Rivalutazione di best_genome.pkl sulla suite di validazione "
-              f"({len(VALIDATION_SEEDS)} seed, fitness v{FITNESS_VERSION})...")
+        print("Rivalutazione di best_genome.pkl sulla suite di conferma "
+              f"({len(CONFIRMATION_SEEDS)} seed, fitness v{FITNESS_VERSION})...")
         mean, stats, per_seed = self._run_validation(
-            [self.best_genome], config, phase='rivalutazione')[self.best_genome.key]
+            [self.best_genome], config, phase='rivalutazione',
+            seeds=CONFIRMATION_SEEDS)[self.best_genome.key]
         if mean == -math.inf:
             print("  best_genome.pkl non valutabile: record azzerato")
             return
@@ -1015,7 +1053,7 @@ class NeatTrainer:
         except (OSError, ValueError, KeyError, TypeError):
             return None
         if (meta.get('fitness_version') != FITNESS_VERSION
-                or meta.get('validation_seeds') != list(VALIDATION_SEEDS)
+                or meta.get('validation_seeds') != list(CONFIRMATION_SEEDS)
                 or meta.get('max_frames') != MAX_FRAMES_PER_EPISODE
                 or meta.get('genome_key') != getattr(self.best_genome, 'key', None)):
             return None
@@ -1030,7 +1068,7 @@ class NeatTrainer:
         meta = {
             'fitness_version': FITNESS_VERSION,
             'validation_mean': mean,
-            'validation_seeds': list(VALIDATION_SEEDS),
+            'validation_seeds': list(CONFIRMATION_SEEDS),
             'validation_fitness': per_seed,
             'max_frames': MAX_FRAMES_PER_EPISODE,
             'genome_key': genome.key,
@@ -1149,20 +1187,21 @@ class NeatTrainer:
 
         species_set = self._population.species
         num_species = len(species_set.species)
+        threshold = config.species_set_config.compatibility_threshold
 
-        # Se troppo poche specie: abbassa threshold per forzare speciazione
-        if num_species <= 2:
-            threshold = config.species_set_config.compatibility_threshold
-            if threshold > 1.0:
-                new_t = max(1.0, threshold * 0.85)
-                config.species_set_config.compatibility_threshold = new_t
-                print(f"  [Anti-stagnazione] Threshold abbassato: {threshold:.2f} -> {new_t:.2f}")
-        # Se troppe specie: alza threshold per evitare frammentazione
-        elif num_species > 20:
-            threshold = config.species_set_config.compatibility_threshold
-            new_t = min(6.0, threshold * 1.1)
+        # Tiene le specie tra SPECIES_TARGET_MIN e SPECIES_TARGET_MAX: con 20
+        # specie da ~10 genomi le linee migliori si estinguevano in ~20
+        # generazioni. Passo piccolo: il numero di specie reagisce in ritardo
+        if num_species < SPECIES_TARGET_MIN:
+            new_t = max(THRESHOLD_MIN, threshold * (1 - THRESHOLD_STEP))
+        elif num_species > SPECIES_TARGET_MAX:
+            new_t = min(THRESHOLD_MAX, threshold * (1 + THRESHOLD_STEP))
+        else:
+            return
+        if new_t != threshold:
             config.species_set_config.compatibility_threshold = new_t
-            print(f"  [Anti-stagnazione] Troppe specie ({num_species}), threshold alzato: {threshold:.2f} -> {new_t:.2f}")
+            print(f"  [Speciazione] {num_species} specie (obiettivo {SPECIES_TARGET_MIN}-"
+                  f"{SPECIES_TARGET_MAX}), threshold {threshold:.2f} -> {new_t:.2f}")
 
     def _draw_training_overlay(self, env, genome_num, total, frame, episode=1, episodes=1):
         """Disegna l'overlay con info training sopra il gioco."""
@@ -1198,11 +1237,18 @@ class NeatTrainer:
         )
         self.screen.blit(bottom_text, (10, SCREEN_HEIGHT - 26))
 
+    _OVERLAY_PHASES = {
+        'validazione': "Selezione dei migliori",
+        'conferma': "Conferma del candidato",
+        'rivalutazione': "Rivalutazione del record",
+    }
+
     def _draw_validation_overlay(self, done, total):
         """Training visuale: avanzamento della validazione (senza rendering)."""
         self.screen.fill((10, 10, 30))
         text = self._font.render(
-            f"Gen {self.generation + 1} | Validazione dei migliori: episodio {done}/{total} | "
+            f"Gen {self.generation + 1} | {self._OVERLAY_PHASES.get(self._progress[0], 'Validazione')}: "
+            f"episodio {done}/{total} | "
             f"Record val.: {self._format_record()}",
             True, (255, 255, 0)
         )
@@ -1224,7 +1270,9 @@ class NeatTrainer:
             'workers': max(1, multiprocessing.cpu_count() - 1) if self._headless else 1,
             'episodes_per_genome': EPISODES_PER_GENOME,
             'validation_seeds': len(VALIDATION_SEEDS),
+            'confirmation_seeds': len(CONFIRMATION_SEEDS),
             'validation_top_k': VALIDATION_TOP_K,
+            'species_target': [SPECIES_TARGET_MIN, SPECIES_TARGET_MAX],
             'max_episode_s': MAX_EPISODE_SECONDS,
             'min_episode_s': MIN_EPISODE_SECONDS,
             'early_stop_idle_pct': EARLY_STOP_IDLE_RATIO * 100,
@@ -1245,7 +1293,7 @@ class NeatTrainer:
         """Fase e avanzamento correnti, per la schermata e per live.js.
 
         Fasi: avvio, rivalutazione (record all'avvio), valutazione,
-        validazione, fermo.
+        validazione (selezione), conferma, fermo.
         """
         self._progress = (phase, done, total)
         if self._dash is None:
@@ -1272,25 +1320,35 @@ class NeatTrainer:
             'value': mean,
             'generation': generation,
             'per_seed': per_seed,
-            'seeds': list(VALIDATION_SEEDS),
+            'seeds': list(CONFIRMATION_SEEDS),
         }
         if stats:
             info['stats'] = _game_stats(stats)
             info['comp'] = {k: stats.get(k, 0) for k, *_ in FITNESS_COMPONENTS}
         return info
 
-    def _validation_summary(self):
-        """Migliore validato della generazione: media, dispersione, statistiche."""
-        if not self._last_validation:
+    @staticmethod
+    def _suite_summary(last, cache):
+        """Media, dispersione e statistiche di gioco di una suite giocata
+        nell'ultima generazione (`last` = (key, media)), None se non giocata."""
+        if not last:
             return None
-        key, mean = self._last_validation
-        _, stats, per_seed = self._val_cache.get(key, (None, None, None))
+        key, mean = last
+        _, stats, per_seed = cache.get(key, (None, None, None))
         out = {'key': key, 'mean': mean}
         if per_seed and all(f is not None for f in per_seed):
             out['sd'] = _summary(per_seed)['sd']
         if stats:
             out.update(_game_stats(stats))
         return out
+
+    def _validation_summary(self):
+        """Migliore della selezione (VALIDATION_SEEDS) della generazione."""
+        return self._suite_summary(self._last_validation, self._val_cache)
+
+    def _confirmation_summary(self):
+        """Conferma (CONFIRMATION_SEEDS) della generazione, None se non giocata."""
+        return self._suite_summary(self._last_confirmation, self._conf_cache)
 
     def _species_rows(self):
         """Specie della generazione valutata, ordinate per fitness migliore."""
@@ -1343,6 +1401,7 @@ class NeatTrainer:
                              fitness=best['fitness'],
                              species=genome_to_species.get(best['genome'].key)),
             'val': self._validation_summary(),
+            'conf': self._confirmation_summary(),
             'record': self.best_fitness,
             'record_key': getattr(self.best_genome, 'key', None),
             'new_record': self._new_record_this_gen,
@@ -1395,9 +1454,10 @@ class NeatTrainer:
 
     _PHASE_LABELS = {
         'avvio': "Avvio del training",
-        'rivalutazione': "Rivalutazione del record sulle partite di validazione",
+        'rivalutazione': "Rivalutazione del record sulle partite di conferma",
         'valutazione': "Valutazione dei genomi della generazione",
-        'validazione': "Validazione dei migliori su partite fisse",
+        'validazione': "Selezione dei migliori su partite fisse",
+        'conferma': "Conferma del candidato al record",
         'fermo': "Training fermo",
     }
 
@@ -1445,7 +1505,7 @@ class NeatTrainer:
         if total:
             fill = bar.copy()
             fill.width = max(12, int(bar.width * done / total))
-            color = self._C_INFO if phase in ('validazione', 'rivalutazione') else self._C_GOOD
+            color = self._C_INFO if phase in ('validazione', 'conferma', 'rivalutazione') else self._C_GOOD
             pygame.draw.rect(s, color, fill, border_radius=6)
 
         hist = self._current_history()
@@ -1485,7 +1545,7 @@ class NeatTrainer:
             delta = ("nessun nuovo record in sessione", self._C_MUTED)
         rec_stats = (self._record_info or {}).get('stats')
         tiles = [("RECORD DI VALIDAZIONE", self._format_record(), self._C_ACCENT,
-                  "fitness media su 10 partite fisse", delta)]
+                  f"fitness media su {len(CONFIRMATION_SEEDS)} partite fisse", delta)]
 
         # 2. Come gioca il record
         if rec_stats:
@@ -1494,7 +1554,8 @@ class NeatTrainer:
                           (f"{self._fmt(rec_stats['kills'] + rec_stats['missile_kills'] + rec_stats['bomb_kills'], 1)}"
                            f" uccisioni, {self._fmt(rec_stats['lives_lost'], 1)} vite perse", self._C_MUTED)))
         else:
-            tiles.append(("IL RECORD IN PARTITA", "n/d", self._C_TEXT, "media delle 10 partite", ("", self._C_MUTED)))
+            tiles.append(("IL RECORD IN PARTITA", "n/d", self._C_TEXT,
+                          f"media delle {len(CONFIRMATION_SEEDS)} partite", ("", self._C_MUTED)))
 
         # 3. Fitness media della popolazione (media mobile) e tendenza
         means = [r['fit']['mean'] for r in hist if r.get('fit')]
@@ -1535,7 +1596,7 @@ class NeatTrainer:
             self.screen.blit(f['small'].render(line2, True, color2), (rect.x + 16, rect.y + 110))
 
     def _draw_progress_chart(self, rect, hist):
-        """Andamento: record, migliore validato per generazione, media mobile."""
+        """Andamento: record, migliore della selezione per generazione, media mobile."""
         s = self.screen
         f = self._fonts
         pygame.draw.rect(s, self._C_CARD, rect, border_radius=10)
@@ -1547,7 +1608,7 @@ class NeatTrainer:
             s.blit(msg, msg.get_rect(center=rect.center))
             return
 
-        legend = [("record", self._C_GOOD), ("migliore validato della generazione", self._C_INFO),
+        legend = [("record", self._C_GOOD), ("migliore della selezione", self._C_INFO),
                   ("media della popolazione (mobile, 10 gen)", self._C_ACCENT)]
         lx = rect.right - 16
         for text, color in reversed(legend):

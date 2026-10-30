@@ -323,7 +323,7 @@ fitness = enemies_killed × 50          # bullet kills
         - shots_fired × 0.01
 ```
 
-`FITNESS_VERSION` (currently 3) identifies this formula together with the `GameEnv` rules and the validation suite; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
+`FITNESS_VERSION` (currently 4) identifies this formula together with the `GameEnv` rules and the validation suites; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
 
 How the counters are measured in `GameEnv`:
 - **Kills**: `enemies_killed` counts bullet kills, `missile_kills` the kills of every missile (counted on the snapshot taken before `missiles.update()`, so the kills of the frame in which a missile is spent or leaves the screen are included), `bomb_kills` the enemies cleared by a bomb.
@@ -383,10 +383,10 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
    - if the checkpoint was saved with a different FITNESS_VERSION, the species fitness
      history is reset (it would otherwise be on the old scale and mark every species stagnant)
    - the validation record of ai/best_genome.pkl is read from ai/best_genome_meta.json, or
-     recomputed with the validation suite if the sidecar is missing or stale
+     recomputed with the confirmation suite if the sidecar is missing or stale
 2. For each generation:
-   a. Evaluate all genomes on the same 2 seeds (common random numbers: generation × 1000 + k,
-      new each generation); fitness = mean of the 2 episodes
+   a. Evaluate all genomes on the same 4 seeds (common random numbers: generation × 1000 + k,
+      new each generation); fitness = mean of the 4 episodes (EPISODES_PER_GENOME)
       - headless: persistent multiprocessing.Pool, imap_unordered (chunksize=1), one task per genome
       - visual: serial, in-process, rendering 1 frame out of 4
       - Each evaluation: compile the genome's FeedForwardNetwork into a generated Python function
@@ -396,11 +396,14 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
       - Virtual time system ensures deterministic evaluation
         (pygame.time.get_ticks patched to frame_count × 1000 / FPS, ≈16.7 ms per frame)
    b. Apply imitation learning bonus (from gen 10; headless: computed in the workers)
-   c. Validation: the 5 genomes with the highest game fitness (without imitation) play one full
-      episode (10800 frames, no early termination, no imitation) on each of 10 fixed seeds;
-      the best mean replaces ai/best_genome.pkl if it beats the validation record
-      (headless: in the Pool; genomes already validated in the session, e.g. elites, are cached)
-   d. Adjust the compatibility threshold if needed (Anti-Stagnation)
+   c. Validation in two stages, full episodes (10800 frames, no early termination, no imitation):
+      - selection: the 5 genomes with the highest game fitness (without imitation) play the
+        10 fixed VALIDATION_SEEDS
+      - confirmation: if the best selection mean beats the record, that genome plays the 40
+        fixed CONFIRMATION_SEEDS and replaces ai/best_genome.pkl if its confirmation mean beats
+        the record (the record is the confirmation mean of best_genome.pkl)
+      (headless: in the Pool; genomes already played in the session, e.g. elites, are cached)
+   d. Adjust the compatibility threshold towards 5-10 species (Anti-Stagnation)
    e. Append the generation to ai/training_history.jsonl and refresh the dashboard data
    f. NEAT reproduction + speciation (neat-python)
    g. Checkpoint every 10 generations (only the last 2 kept), and on interruption
@@ -408,7 +411,7 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
 
 **Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy` and a 1×1 display for headless Pygame operation, receives the imitation samples and the human action frequencies through the pool initializer, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation and validation episodes are distributed via `pool.imap_unordered()`; the summary screen is redrawn (and `ESC`/`D` polled) every 5 completed genomes and after every validation episode.
 
-**Cost** (8-core machine, 7 workers, measured on the checkpoint-80 population): about 150 worker-µs per game frame; a generation of 200 genomes × 2 episodes takes ~13 s plus ~5 s of validation while genomes die early (~1500 frames per episode), and would take ~95 s plus up to ~12 s of validation if every episode reached the 180 s cap.
+**Cost** (8-core machine, 7 workers, measured on the checkpoint-80 population): about 150 worker-µs per game frame; a generation of 200 genomes × 2 episodes took ~13 s plus ~5 s of validation while genomes die early (~1500 frames per episode), and would take ~95 s plus up to ~12 s of validation if every episode reached the 180 s cap. With 4 episodes per genome the evaluation time doubles; a confirmation (40 full episodes) adds roughly 8 s to the generations that need one.
 
 ### Training Dashboard
 
@@ -416,9 +419,9 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
 - `dashboard/data.js` (`window.YS_DATA`), rewritten at the end of every generation: the whole history, the detail of the last generation (top 10 genomes, species table, record with per-seed fitness and fitness breakdown) and the training parameters, including the fitness components with their weights and descriptions (`FITNESS_COMPONENTS` in `neat_trainer.py`, kept next to `_compute_fitness`);
 - `dashboard/live.js` (`window.YS_LIVE`), rewritten at most once per second: phase (`avvio`, `rivalutazione`, `valutazione`, `validazione`, `fermo`), progress, generation and the stamp of `data.js`.
 
-The page polls `live.js` every 3 s and reloads `data.js` only when its stamp changes. The history is kept in `ai/training_history.jsonl` (one JSON line per generation, appended, committed like the other training state), so the dashboard also shows previous sessions; if a generation appears twice (resume from an older checkpoint) the last line wins. Each line holds: generation, fitness version, session, duration, episode cap, population fitness summary (mean, median, 10th/90th percentile, min, max, sd), game statistics averaged over the population and over the top 10% by fitness (score, survival seconds, level, lives lost, kills per weapon, missiles collected/fired, bombs used, power-ups, idle %, accuracy), mean fitness components, the generation's best genome, the validated best of the generation (mean, sd and game statistics on the validation seeds), the record and the record's game statistics, species (count, threshold, max stagnation, size per species) and network size (mean/max nodes and enabled connections).
+The page polls `live.js` every 3 s and reloads `data.js` only when its stamp changes. The history is kept in `ai/training_history.jsonl` (one JSON line per generation, appended, committed like the other training state), so the dashboard also shows previous sessions; if a generation appears twice (resume from an older checkpoint) the last line wins. Each line holds: generation, fitness version, session, duration, episode cap, population fitness summary (mean, median, 10th/90th percentile, min, max, sd), game statistics averaged over the population and over the top 10% by fitness (score, survival seconds, level, lives lost, kills per weapon, missiles collected/fired, bombs used, power-ups, idle %, accuracy), mean fitness components, the generation's best genome, the best of the selection stage (mean, sd and game statistics on the validation seeds), the confirmation played in the generation if any (same fields, on the confirmation seeds), the record and the record's game statistics, species (count, threshold, max stagnation, size per species) and network size (mean/max nodes and enabled connections).
 
-Sections: status bar (live phase and progress), a plain-language verdict (record improvements, population trend, how the record plays, behavior warnings, species, speed), six indicator cards with sparklines, progress (record and validated bests, population fitness with rolling mean and 10–90% band, the record's per-seed validation fitness), gameplay (score, survival, level, kills per weapon), behavior (idle time, accuracy, lives lost, missiles, bombs, power-ups), fitness breakdown (record vs population mean, and the main components over time), species (stacked sizes and table with stagnation), networks and timing, the last generation's top 10, and a glossary with the training parameters. Trend badges compare the mean of the last 15 generations with the previous 15 and report "stable" when the difference is within the generation-to-generation noise (|z| < 2); the verdict and the trends use only the current `FITNESS_VERSION`, and charts mark version changes and resumed sessions with dashed lines. The range selector (last 50, last 200, all generations) and the theme (auto, light, dark) are stored in the browser's `localStorage`.
+Sections: status bar (live phase and progress), a plain-language verdict (record improvements, population trend, how the record plays, behavior warnings, species, speed), six indicator cards with sparklines, progress (record, best of the selection stage and confirmations, population fitness with rolling mean and 10–90% band, the record's per-seed confirmation fitness), gameplay (score, survival, level, kills per weapon), behavior (idle time, accuracy, lives lost, missiles, bombs, power-ups), fitness breakdown (record vs population mean, and the main components over time), species (stacked sizes and table with stagnation), networks and timing, the last generation's top 10, and a glossary with the training parameters. Trend badges compare the mean of the last 15 generations with the previous 15 and report "stable" when the difference is within the generation-to-generation noise (|z| < 2); the verdict and the trends use only the current `FITNESS_VERSION`, and charts mark version changes and resumed sessions with dashed lines. The range selector (last 50, last 200, all generations) and the theme (auto, light, dark) are stored in the browser's `localStorage`.
 
 ### NEAT Hyperparameters
 
@@ -437,19 +440,19 @@ From `ai/neat_config.txt`:
 | Node add prob | 35% | Hidden neuron insertion |
 | Connection delete prob | 20% | Pruning |
 | Node delete prob | 10% | Simplification |
-| Compatibility threshold | 3.0 | Initial species boundary for a new run (adjusted at runtime by anti-stagnation; a resumed run keeps the adapted value) |
+| Compatibility threshold | 3.0 | Initial species boundary for a new run (adjusted at runtime towards 5-10 species; a resumed run keeps the adapted value) |
 | Compatibility coefficients | disjoint 1.0, weight 0.5 | |
-| Stagnation limit | 12 gens | Per-species patience (`species_fitness_func = mean`) |
-| Species elitism | 2 | Species protected from stagnation removal |
+| Stagnation limit | 25 gens | Per-species patience (`species_fitness_func = mean`) |
+| Species elitism | 3 | Species protected from stagnation removal |
 | Elitism | 3 | Top genomes preserved per species |
 | Survival threshold | 20% | Only top 20% reproduce |
 | Min species size | 3 | Prevents tiny species |
 
 ### Anti-Stagnation Mechanisms
 
-1. **Speciation control** (`_check_and_fix_stagnation()`, after every generation): if 2 or fewer species remain, the compatibility threshold is multiplied by 0.85 (min 1.0) to encourage speciation; with more than 20 species it is multiplied by 1.1 (max 6.0) to avoid fragmentation. The change applies to the next speciation, also after a resume
-2. **Species stagnation** (neat-python `DefaultStagnation`): species whose mean fitness does not improve on their best for 12 generations are removed (the 2 best species are always protected)
-3. **Noise reduction**: common seeds for the whole generation and a 2-episode mean make species fitness and elites less dependent on a lucky episode
+1. **Speciation control** (`_check_and_fix_stagnation()`, after every generation): the compatibility threshold keeps the number of species between `SPECIES_TARGET_MIN` (5) and `SPECIES_TARGET_MAX` (10): below it is multiplied by 0.95 (min 1.0), above by 1.05 (max 6.0). The change applies to the next speciation, also after a resume. With the former limits (only ≤ 2 or > 20 species) the population settled on ~20 species of ~10 genomes and no species lived more than ~40 generations
+2. **Species stagnation** (neat-python `DefaultStagnation`): species whose mean fitness does not improve on their best for 25 generations are removed (the 3 best species by current mean fitness are always protected)
+3. **Noise reduction**: common seeds for the whole generation and a 4-episode mean make species fitness and elites less dependent on a lucky episode (with 2 episodes, only 6 of the top 20 genomes on one pair of seeds were in the top 20 on another pair)
 
 The former injection of fresh/mutated genomes on fitness plateaus was removed: it ran inside the evaluation callback, left genomes without fitness (neat-python's `Population.run()` raises `RuntimeError`) and the injected genomes never reached reproduction.
 
@@ -458,15 +461,15 @@ The former injection of fresh/mutated genomes on fitness plateaus was removed: i
 | File | Format | Content |
 |------|--------|---------|
 | `ai/neat-checkpoint-{N}` | gzip-compressed pickle | Full NEAT state: generation, config (with `fitness_version`), population, species, random state |
-| `ai/best_genome.pkl` | Pickle | The genome with the best validation mean (used for Coop mode) |
-| `ai/best_genome_meta.json` | JSON | Validation record of `best_genome.pkl`: `validation_mean`, per-seed fitness, mean validation statistics (`validation_stats`), `validation_seeds`, `max_frames`, `fitness_version`, `genome_key`, generation, timestamp |
+| `ai/best_genome.pkl` | Pickle | The genome with the best confirmation mean (used for Coop mode) |
+| `ai/best_genome_meta.json` | JSON | Validation record of `best_genome.pkl` on the confirmation suite: `validation_mean`, per-seed fitness, mean statistics (`validation_stats`), `validation_seeds` (the confirmation seeds), `max_frames`, `fitness_version`, `genome_key`, generation, timestamp |
 | `ai/training_history.jsonl` | JSON Lines | One line per evaluated generation, read by the training dashboard (see Training Dashboard) |
 | `ai/human_sessions/session_*.pkl` | Pickle | Recorded human (observation, action) frame pairs + final score + format version |
 | `scores.json` | JSON | Top-10 human player leaderboard (`name`, `score`), UTF-8, written atomically (temporary file + `os.replace`). A missing, empty or invalid file reads as an empty leaderboard (malformed entries are skipped); an unparsable file is renamed to `scores.json.bak` before the next save; if the file cannot be written the score is not saved and the game goes on |
 
 Checkpoints are saved every 10 generations by `_RollingCheckpointer` (the first one right after the first generation of a resumed run), and also when training is interrupted with `ESC`, by closing the window or with Ctrl+C, if at least one generation was completed in the session. Each checkpoint is written to a temporary file (`neat-checkpoint-tmp`) and renamed, so an interrupted write never leaves a truncated checkpoint; the rotation keeps the 2 most recent up to the one just saved (`MAX_CHECKPOINTS = 2`). On startup the readable checkpoint with the highest generation is resumed: unreadable files are skipped with a warning and non-numeric suffixes (e.g. `.bak`) are ignored.
 
-`ai/best_genome.pkl` (same format as before: a pickled `DefaultGenome`) and its sidecar are written atomically whenever a validated genome beats the record. If the sidecar is missing, refers to another genome, or was written with another `FITNESS_VERSION`, validation seeds or episode cap, the existing `best_genome.pkl` is re-validated at startup to set the record. These files are committed to the repository so training can continue across machines.
+`ai/best_genome.pkl` (same format as before: a pickled `DefaultGenome`) and its sidecar are written atomically whenever a confirmed genome beats the record. If the sidecar is missing, refers to another genome, or was written with another `FITNESS_VERSION`, confirmation seeds or episode cap, the existing `best_genome.pkl` is re-validated at startup to set the record. These files are committed to the repository so training can continue across machines.
 
 ---
 
