@@ -9,6 +9,7 @@ Gestisce:
 """
 
 import glob
+import math
 import os
 import pickle
 import time
@@ -129,10 +130,85 @@ def _decode_actions_static(output):
     }
 
 
-def _init_worker():
-    """Inizializza pygame in ogni processo worker del Pool."""
+def compile_network(genome, config):
+    """Compila la rete feed-forward del genoma in una funzione Python generata.
+
+    Equivale bit per bit a neat.nn.FeedForwardNetwork.activate ma e' circa 2x
+    piu' veloce: stessi nodi nello stesso ordine, stessi termini peso*input
+    passati alla stessa funzione di aggregazione (su una tupla invece che su
+    una lista), stessa espressione bias + response * s. Non sommare i termini
+    inline (a + b + c): da Python 3.12 sum() sui float e' compensata e il
+    risultato cambierebbe negli ultimi bit.
+
+    Restituisce act(inputs) -> lista degli output. La funzione non e'
+    picklable: non salvarla sul genoma (finirebbe nei checkpoint e in
+    best_genome.pkl).
+    """
+    net = neat.nn.FeedForwardNetwork.create(genome, config)
+    in_idx = {k: j for j, k in enumerate(net.input_nodes)}
+    # repr() di inf/nan produce un nome, non un letterale
+    ns = {'inf': math.inf, 'nan': math.nan}
+
+    def ref(k):
+        if k in in_idx:
+            return f"x[{in_idx[k]}]"
+        return f"n_{'m' if k < 0 else 'p'}{abs(k)}"
+
+    # feed_forward_layers garantisce che ogni link referenzi un input o un
+    # nodo gia' calcolato nelle righe precedenti
+    lines = ["def act(x):"]
+    computed = set()
+    for j, (node, act_func, agg_func, bias, response, links) in enumerate(net.node_evals):
+        ns[f"A{j}"] = act_func
+        ns[f"G{j}"] = agg_func
+        terms = "".join(f"{ref(i)} * {w!r}, " for i, w in links)
+        lines.append(f"    {ref(node)} = A{j}({bias!r} + {response!r} * G{j}(({terms})))")
+        computed.add(node)
+    # Output mai calcolati: restano a 0.0 come in FeedForwardNetwork.values
+    outs = ", ".join(ref(k) if k in computed else "0.0" for k in net.output_nodes)
+    lines.append(f"    return [{outs}]")
+    exec(compile("\n".join(lines), "<neat-net>", "exec"), ns)
+    return ns["act"]
+
+
+def _imitation_bonus_from_samples(act, samples):
+    """Bonus fitness per somiglianza alle azioni umane registrate (max ~300).
+
+    `act` e' la rete compilata del genoma, `samples` la lista di tuple
+    (obs, azione umana, peso) estratta da NeatTrainer._load_imitation_samples.
+    """
+    total_match = 0
+    total_weight = 0
+    for obs, human_action, score_weight in samples:
+        ai_action = _decode_actions_static(act(obs))
+        match = NeatTrainer._action_similarity(ai_action, human_action)
+        total_match += match * score_weight
+        total_weight += score_weight
+
+    if total_weight == 0:
+        return 0.0
+
+    # Max bonus ~300 punti
+    similarity = total_match / total_weight
+    return similarity * 300
+
+
+# Campioni per l'imitation bonus nel processo worker (impostati da _init_worker)
+_IMITATION_SAMPLES = None
+
+
+def _init_worker(imitation_samples=None):
+    """Inizializza pygame in ogni processo worker del Pool.
+
+    `imitation_samples` sono i campioni estratti in train() prima di creare
+    il Pool: il worker calcola l'imitation bonus in parallelo invece di
+    lasciarlo in serie al processo principale.
+    """
+    global _IMITATION_SAMPLES
+    _IMITATION_SAMPLES = imitation_samples
     import os
     os.environ["SDL_VIDEODRIVER"] = "dummy"
+    os.environ["SDL_AUDIODRIVER"] = "dummy"  # i worker non aprono il device audio
     pygame.init()
     pygame.display.set_mode((1, 1))
     # Imposta priorità bassa per non saturare le CPU
@@ -149,17 +225,17 @@ def _eval_genome_worker(args):
     """Valuta un singolo genoma in un processo separato (per multiprocessing).
 
     Funzione top-level per essere picklable.
-    Restituisce (idx, fitness, env_stats) per imap_unordered.
+    Restituisce (idx, fitness, env_stats, imitation_bonus) per imap_unordered.
     """
     idx, _genome_id, genome, config, max_frames, generation, seed = args
 
     try:
-        net = neat.nn.FeedForwardNetwork.create(genome, config)
+        act = compile_network(genome, config)
         env = GameEnv(render=False, screen=None)
         obs = env.reset(seed=seed)
 
         for frame in range(max_frames):
-            output = net.activate(obs)
+            output = act(obs)
             actions = _decode_actions_static(output)
             obs, reward, done = env.step(actions)
 
@@ -176,7 +252,12 @@ def _eval_genome_worker(args):
 
         fitness, env_stats = _compute_fitness(env)
         env.close()
-        return idx, fitness, env_stats
+
+        # Imitation bonus calcolato qui, in parallelo, invece che nel main
+        imitation_bonus = 0.0
+        if _IMITATION_SAMPLES is not None and generation >= IMITATION_START_GEN:
+            imitation_bonus = _imitation_bonus_from_samples(act, _IMITATION_SAMPLES)
+        return idx, fitness, env_stats, imitation_bonus
     except Exception:
         # Ritorna fitness molto negativa per non bloccare il training
         return idx, -10000.0, {
@@ -189,7 +270,7 @@ def _eval_genome_worker(args):
             'comp_level': 0, 'comp_powerups': 0, 'comp_missiles': 0,
             'comp_upgrades': 0, 'comp_shield': 0, 'comp_idle': 0,
             'comp_near_misses': 0, 'comp_pu_approach': 0,
-        }
+        }, 0.0
 
 
 class _RollingCheckpointer(neat.Checkpointer):
@@ -228,7 +309,10 @@ class NeatTrainer:
         self.best_genome = None
         self.best_fitness = -1
         self.generation = 0
-        self._human_sessions = None  # cache lazy
+        # Imitation bonus: campioni (obs, azione umana, peso) dalle ultime
+        # 5 sessioni umane, caricati una volta in train() prima del Pool
+        self._imitation_samples = None
+        self._human_sessions_count = None  # None = sessioni non ancora caricate
         self._headless = False
         self._font = None
         self._font_small = None
@@ -315,11 +399,16 @@ class NeatTrainer:
         self._population = p
         self._stats_reporter = stats
 
+        # Sessioni umane per l'imitation bonus: caricate prima del Pool,
+        # perche' i campioni vengono passati ai worker con initargs
+        self._load_imitation_samples()
+
         # Pool persistente per headless (evita di ricreare i processi ogni gen)
         if headless:
             num_workers = max(1, multiprocessing.cpu_count() - 1)
             self._pool = multiprocessing.Pool(
-                processes=num_workers, initializer=_init_worker
+                processes=num_workers, initializer=_init_worker,
+                initargs=(self._imitation_samples,),
             )
 
         try:
@@ -341,9 +430,9 @@ class NeatTrainer:
 
         In modalita' headless usa multiprocessing per parallelizzare.
         """
-        # Pre-carica sessioni umane (una volta)
-        if self._human_sessions is None:
-            self._human_sessions = self._load_human_sessions()
+        # Sessioni umane (di norma gia' caricate in train())
+        if self._human_sessions_count is None:
+            self._load_imitation_samples()
 
         self._gen_start_time = time.time()
 
@@ -378,12 +467,12 @@ class NeatTrainer:
             # imap_unordered: i worker non restano mai idle in attesa
             # dei genomi piu' lenti — appena uno finisce, parte il successivo
             completed = 0
-            for idx, fitness, env_stats in self._pool.imap_unordered(
+            for idx, fitness, env_stats, imitation_bonus in self._pool.imap_unordered(
                 _eval_genome_worker, worker_args, chunksize=1
             ):
                 genome_id, genome = genomes[idx]
                 genome.fitness = fitness
-                self._collect_stats(genome, env_stats)
+                self._collect_stats(genome, env_stats, imitation_bonus)
 
                 if genome.fitness > best_fitness_in_gen:
                     best_fitness_in_gen = genome.fitness
@@ -481,13 +570,16 @@ class NeatTrainer:
         t = min(1.0, self.generation / 50.0)
         return int(MIN_FRAMES_PER_EPISODE + t * (MAX_FRAMES_PER_EPISODE - MIN_FRAMES_PER_EPISODE))
 
-    def _collect_stats(self, genome, env_stats):
+    def _collect_stats(self, genome, env_stats, imitation_bonus=None):
         """Raccoglie le statistiche di un genoma valutato.
 
-        Applica anche l'imitation bonus se disponibile.
+        Applica anche l'imitation bonus se disponibile: in headless arriva
+        gia' calcolato dal worker, nel training visuale viene calcolato qui.
         """
-        if self._human_sessions and self.generation >= IMITATION_START_GEN:
-            genome.fitness += self._imitation_bonus(genome, self.config)
+        if self._imitation_samples is not None and self.generation >= IMITATION_START_GEN:
+            if imitation_bonus is None:
+                imitation_bonus = self._imitation_bonus(genome, self.config)
+            genome.fitness += imitation_bonus
         self._current_gen_fitnesses.append(genome.fitness)
         self._current_gen_scores.append(env_stats['score'])
         self._current_gen_levels.append(env_stats['level'])
@@ -504,7 +596,7 @@ class NeatTrainer:
 
         Se render=True, mostra la partita sullo schermo in tempo reale.
         """
-        net = neat.nn.FeedForwardNetwork.create(genome, config)
+        act = compile_network(genome, config)
         env = GameEnv(render=render, screen=self.screen)
         seed = (genome.key if hasattr(genome, 'key') else id(genome)) + self.generation * 10000
         obs = env.reset(seed=seed)
@@ -522,9 +614,13 @@ class NeatTrainer:
                             env.close()
                             raise _TrainingInterrupted()
 
-            output = net.activate(obs)
+            output = act(obs)
             actions = self._decode_actions(output)
-            obs, reward, done = env.step(actions)
+            # Disegna solo i frame che verranno mostrati (1 su TRAIN_RENDER_SKIP):
+            # lo sfondo avanza comunque in _update, quindi l'immagine non cambia
+            obs, reward, done = env.step(
+                actions, draw=render and frame % TRAIN_RENDER_SKIP == 0
+            )
 
             # Terminazione anticipata: genoma scarso (check periodico)
             if (frame >= EARLY_STOP_MIN_FRAME
@@ -644,7 +740,7 @@ class NeatTrainer:
         self.screen.blit(overlay_bg, (0, 0))
 
         # Riga superiore: info generazione e genoma
-        n_sessions = len(self._human_sessions) if self._human_sessions else 0
+        n_sessions = self._human_sessions_count or 0
         imitation = f" | Sessioni umane: {n_sessions}" if n_sessions > 0 else ""
 
         top_text = self._font.render(
@@ -1085,36 +1181,16 @@ class NeatTrainer:
         return f"{hours}h {mins}m"
 
     def _imitation_bonus(self, genome, config):
-        """Bonus fitness per somiglianza alle azioni umane registrate."""
-        if not self._human_sessions:
+        """Bonus fitness per somiglianza alle azioni umane registrate.
+
+        Calcolato nel main solo dal training visuale: in headless lo calcola
+        il worker (_eval_genome_worker) con gli stessi campioni.
+        """
+        if self._imitation_samples is None:
             return 0.0
-
-        net = neat.nn.FeedForwardNetwork.create(genome, config)
-        total_match = 0
-        total_weight = 0
-
-        # Usa le ultime 5 sessioni, pesate per score
-        for session in self._human_sessions[-5:]:
-            score_weight = max(1.0, session['score'] / 500.0)
-            frames = session['frames']
-
-            # Campiona max 200 frame per sessione (uniformemente)
-            step = max(1, len(frames) // 200)
-            for j in range(0, len(frames), step):
-                obs, human_action = frames[j]
-                ai_output = net.activate(obs)
-                ai_action = self._decode_actions(ai_output)
-
-                match = self._action_similarity(ai_action, human_action)
-                total_match += match * score_weight
-                total_weight += score_weight
-
-        if total_weight == 0:
-            return 0.0
-
-        # Max bonus ~300 punti
-        similarity = total_match / total_weight
-        return similarity * 300
+        return _imitation_bonus_from_samples(
+            compile_network(genome, config), self._imitation_samples
+        )
 
     @staticmethod
     def _action_similarity(ai_action, human_action):
@@ -1155,24 +1231,53 @@ class NeatTrainer:
         """Converte output della rete in azioni di gioco."""
         return _decode_actions_static(output)
 
-    def _load_human_sessions(self):
-        """Carica le sessioni umane salvate su disco."""
-        if not os.path.exists(SESSIONS_DIR):
-            return []
+    def _load_imitation_samples(self):
+        """Carica le sessioni umane ed estrae i campioni per l'imitation bonus.
 
-        sessions = []
-        for filename in sorted(os.listdir(SESSIONS_DIR)):
-            if not filename.endswith('.pkl'):
-                continue
+        Servono solo le ultime 5 sessioni valide (in ordine di nome file; i
+        pickle corrotti vengono saltati): i file si leggono a ritroso finche'
+        non se ne trovano 5 e di ogni sessione si tengono solo i frame
+        campionati, scartando il resto (le sessioni complete occupano
+        centinaia di MB in RAM).
+
+        Imposta _imitation_samples, lista di (obs, azione umana, peso) o None
+        se non c'e' nessuna sessione valida, e _human_sessions_count (file
+        .pkl su disco, mostrato nell'overlay del training visuale).
+        """
+        self._imitation_samples = None
+        self._human_sessions_count = 0
+        if not os.path.exists(SESSIONS_DIR):
+            return
+
+        filenames = sorted(f for f in os.listdir(SESSIONS_DIR) if f.endswith('.pkl'))
+        per_session = []  # campioni per sessione, dalla piu' recente
+        for filename in reversed(filenames):
+            if len(per_session) == 5:
+                break
             filepath = os.path.join(SESSIONS_DIR, filename)
             try:
                 with open(filepath, 'rb') as f:
                     session = pickle.load(f)
-                sessions.append(session)
             except (pickle.UnpicklingError, EOFError, KeyError):
                 continue
 
-        return sessions
+            # Ogni sessione pesata per score
+            score_weight = max(1.0, session['score'] / 500.0)
+            frames = session['frames']
+
+            # Campiona max 200 frame per sessione (uniformemente)
+            step = max(1, len(frames) // 200)
+            samples = []
+            for j in range(0, len(frames), step):
+                obs, human_action = frames[j]
+                samples.append((obs, human_action, score_weight))
+            per_session.append(samples)
+
+        if not per_session:
+            return
+        # Ordine cronologico, come le sessioni [-5:]
+        self._imitation_samples = [s for samples in reversed(per_session) for s in samples]
+        self._human_sessions_count = len(filenames)
 
     def _find_latest_checkpoint(self):
         """Trova il checkpoint NEAT piu' recente."""

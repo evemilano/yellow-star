@@ -20,7 +20,7 @@ from src.scores import load_scores, save_score
 from src.level import LevelManager
 from src.powerup import PowerUp
 from src.sounds import SoundManager
-from src.game_env import build_observation
+from src.game_env import build_observation, groupcollide_fast
 
 
 class Game:
@@ -83,6 +83,12 @@ class Game:
         self.life_icon = self._create_life_icon()
         self.missile_icon = self._create_missile_icon()
         self.bomb_icon = self._create_bomb_icon()
+
+        # Alone del campo protettivo bomba (lv10), pre-renderizzato: viene
+        # blittato centrato sul giocatore invece di allocare ogni frame una
+        # superficie a tutto schermo
+        self._bomb_field_surf = pygame.Surface((164, 164), pygame.SRCALPHA)
+        pygame.draw.circle(self._bomb_field_surf, (200, 80, 255, 30), (82, 82), 80)
 
         # Registrazione sessione per AI
         self.recorder = None
@@ -255,7 +261,7 @@ class Game:
             self.player.shield_break_timer -= dt / FPS
 
         # Collisioni proiettile-nemico
-        hits = pygame.sprite.groupcollide(self.bullets, self.enemies, True, True)
+        hits = groupcollide_fast(self.bullets, self.enemies, True, True)
         for bullet, enemies_hit in hits.items():
             self.score += len(enemies_hit) * 100
             for enemy in enemies_hit:
@@ -275,7 +281,7 @@ class Game:
             missile.kill_positions.clear()
 
         # Collisioni proiettile-asteroide (scintilla sull'impatto)
-        ast_hits = pygame.sprite.groupcollide(self.bullets, self.asteroids, True, False)
+        ast_hits = groupcollide_fast(self.bullets, self.asteroids, True, False)
         for bullet in ast_hits:
             self.explosions.add(Explosion(bullet.rect.centerx, bullet.rect.centery))
 
@@ -502,12 +508,10 @@ class Game:
         # Campo protettivo bomba (alone viola)
         now_draw = pygame.time.get_ticks()
         if now_draw < self.bomb_field_until:
-            shield_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            pygame.draw.circle(
-                shield_surf, (200, 80, 255, 30),
-                self.player.rect.center, 80
+            self.screen.blit(
+                self._bomb_field_surf,
+                self._bomb_field_surf.get_rect(center=self.player.rect.center)
             )
-            self.screen.blit(shield_surf, (0, 0))
 
         # Notifica LEVEL UP
         if self.level_manager.levelup_timer > 0:
@@ -678,14 +682,15 @@ class Game:
         """Carica il miglior genoma NEAT per la nave AI."""
         import pickle
         import neat
-        from src.neat_trainer import CONFIG_PATH, BEST_GENOME_PATH
+        from src.neat_trainer import CONFIG_PATH, BEST_GENOME_PATH, compile_network
         config = neat.Config(
             neat.DefaultGenome, neat.DefaultReproduction,
             neat.DefaultSpeciesSet, neat.DefaultStagnation, CONFIG_PATH,
         )
         with open(BEST_GENOME_PATH, 'rb') as f:
             genome = pickle.load(f)
-        self.ai_net = neat.nn.FeedForwardNetwork.create(genome, config)
+        # Rete compilata: funzione obs -> output (stessi valori di activate)
+        self.ai_net = compile_network(genome, config)
 
     def _get_ai_observation(self):
         """Estrae 52 valori normalizzati per la rete AI (stesso formato di GameEnv)."""
@@ -727,7 +732,7 @@ class Game:
 
         # Genera osservazione e azione
         obs = self._get_ai_observation()
-        output = self.ai_net.activate(obs)
+        output = self.ai_net(obs)
         actions = self._decode_ai_actions(output)
 
         # Movimento
@@ -777,7 +782,7 @@ class Game:
         self.ai_missiles.update(dt)
 
         # Collisioni proiettili AI vs nemici
-        hits = pygame.sprite.groupcollide(self.ai_bullets, self.enemies, True, True)
+        hits = groupcollide_fast(self.ai_bullets, self.enemies, True, True)
         for bullet, enemies_hit in hits.items():
             self.score += len(enemies_hit) * 100
             for enemy in enemies_hit:

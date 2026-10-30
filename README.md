@@ -304,7 +304,7 @@ fitness = enemies_killed × 50          # bullet kills only
         - shots_fired × 0.01
 ```
 
-Fitness is not clipped at 0. `shots_fired` counts volleys, `shots_hit` counts bullets that hit at least one enemy. In headless mode, a genome whose evaluation raises an exception gets a fitness of -10000. The imitation bonus (below) is added on top.
+Fitness is not clipped at 0. `shots_fired` counts volleys, `shots_hit` counts bullets that hit at least one enemy. In headless mode, a genome whose evaluation raises an exception gets a fitness of -10000 (with no imitation bonus). The imitation bonus (below) is added on top.
 
 **Per-step reward** (`GameEnv.step()`): `step()` also returns a shaped reward, which `NeatTrainer` does not use (fitness comes only from `_compute_fitness`):
 - Survival bonus: `+0.02` per frame
@@ -330,8 +330,8 @@ Human gameplay is recorded during **Play** and **Coop** modes via the `HumanReco
 
 **Sessions stored**: `ai/human_sessions/session_{timestamp}.pkl`, a dict `{frames, score, num_frames, timestamp}`, written at game over (max 20 retained)
 
-**Bonus application** (from generation 10, `IMITATION_START_GEN`, computed in the main process for every genome):
-1. Load the human sessions once per training run and use the 5 most recent, each weighted by `max(1, score / 500)`
+**Bonus application** (from generation 10, `IMITATION_START_GEN`, computed for every genome: in headless mode by the worker process right after the episode, in visual mode in the main process):
+1. Load the human sessions once per training run, before the worker pool is created, and use the 5 most recent valid ones, each weighted by `max(1, score / 500)`; only the sampled frames are kept in memory and passed to the workers
 2. Sample frames uniformly with step `max(1, len(frames) // 200)` (about 200-400 frames per session)
 3. Feed each observation to the evolved network
 4. Compare network output with recorded human action
@@ -351,13 +351,14 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
    a. Evaluate all genomes
       - headless: persistent multiprocessing.Pool, imap_unordered (chunksize=1)
       - visual: serial, in-process, rendering 1 frame out of 4
-      - Each evaluation: create FeedForwardNetwork → run GameEnv episode
+      - Each evaluation: compile the genome's FeedForwardNetwork into a generated Python function
+        (same outputs as neat's activate(), about 2x faster) → run GameEnv episode
       - Episode length cap: 900 → 5400 frames, linear over the first 50 generations
         (15 s → 90 s of game time at FPS = 60; the source comments say 30 s - 3 min, assuming 30 FPS)
       - Virtual time system ensures deterministic evaluation
         (pygame.time.get_ticks patched to frame_count × 1000 / FPS, ≈16.7 ms per frame)
       - Per-genome seed: genome_id + generation × 10000
-   b. Apply imitation learning bonus (from gen 10)
+   b. Apply imitation learning bonus (from gen 10; headless: computed in the workers)
    c. Save best genome to ai/best_genome.pkl if new record
    d. Check for stagnation, adjust speciation / inject diversity if needed
    e. Update real-time dashboard
@@ -365,7 +366,7 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
    g. Checkpoint every 10 generations (only the last 2 kept)
 ```
 
-**Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy` and a 1×1 display for headless Pygame operation, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation is distributed via `pool.imap_unordered()`; the dashboard is refreshed (and `ESC` polled) every 5 completed genomes.
+**Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy` and a 1×1 display for headless Pygame operation, receives the imitation samples through the pool initializer, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation is distributed via `pool.imap_unordered()`; the dashboard is refreshed (and `ESC` polled) every 5 completed genomes.
 
 ### NEAT Hyperparameters
 
@@ -568,11 +569,11 @@ The background (`ParallaxBackground` in `src/parallax.py`) is a **biome system**
 Layer speeds come from the `PARALLAX_*_SPEED` constants (0.3 / 0.6 / 1.0 / 1.8 / 2.5 px/frame); the space biome also uses fractions of them.
 
 - **Rotation**: the 6 surface biomes (`SURFACE_BIOMES`) play in a shuffled order, reshuffled when the queue runs out (the current biome is not repeated immediately). Every biome instance is regenerated with a new seed from the background's own `random.Random`, so each visit looks different.
-- **Crossfade**: after `BIOME_DURATION` (60000 ms) in a biome, the next one fades in over `BIOME_FADE_DURATION` (3000 ms): it is drawn on an alpha surface whose opacity rises from 0 to 255 while both biomes keep scrolling. The biome timer advances by `dt × 1000 / 60` ms per update.
+- **Crossfade**: after `BIOME_DURATION` (60000 ms) in a biome, the next one fades in over `BIOME_FADE_DURATION` (3000 ms): it is drawn on an alpha surface whose opacity rises from 0 to 255 while both biomes keep scrolling. The biome timer advances by `dt × 1000 / 60` ms per update. The next surface biome is built in a background thread `BIOME_PREBUILD_LEAD` (5000 ms) before the switch, with the same class and seed a synchronous build would use, so the switch frame does not stall.
 - **Space**: once the level reaches `BIOME_SPACE_LEVEL` (90), the background fades to `SpaceBiome` and stays there.
 - `Game` passes the current level to `update()`. `GameEnv` creates the background only with `render=True` (visual training) and calls `update(dt)` without a level, so the space biome never appears there; headless training has no background.
 
-Each layer is a `ScrollingLayer` tile `2 × SCREEN_WIDTH` wide with seamless wrapping via double-blit; ground strips start at `0.82 × SCREEN_HEIGHT` (the sea surface at `0.62 × SCREEN_HEIGHT`). The color constants `SKY_BLUE`, `LIGHT_BLUE`, `MOUNTAIN_FAR/MID/NEAR` and `GROUND_COLOR` in `settings.py` are not used by the biome renderer.
+Each layer is a `ScrollingLayer` tile `2 × SCREEN_WIDTH` wide with seamless wrapping via double-blit; surface-biome layers are cropped at build time to the rows that contain non-transparent pixels (same image, less per-pixel alpha blending); ground strips start at `0.82 × SCREEN_HEIGHT` (the sea surface at `0.62 × SCREEN_HEIGHT`). The color constants `SKY_BLUE`, `LIGHT_BLUE`, `MOUNTAIN_FAR/MID/NEAR` and `GROUND_COLOR` in `settings.py` are not used by the biome renderer.
 
 ### Procedural Sprite Generation
 

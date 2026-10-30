@@ -5,9 +5,15 @@ from settings import SCREEN_WIDTH, BULLET_SPEED, BULLET_SIZE
 class Bullet(pygame.sprite.Sprite):
     """Proiettile infuocato con scia rosso/arancione."""
 
+    # Frame generati una volta e condivisi tra le istanze (mai modificati)
+    _frames_cache: list[pygame.Surface] | None = None
+
     def __init__(self, x: int, y: int):
         super().__init__()
-        self._create_frames()
+        if Bullet._frames_cache is None:
+            self._create_frames()
+            Bullet._frames_cache = self.frames
+        self.frames = Bullet._frames_cache
         self.frame = 0
         self.image = self.frames[0]
         self.rect = self.image.get_rect(center=(x, y))

@@ -41,6 +41,40 @@ def _nearest_n(sprites, px, py, n):
     )
 
 
+def groupcollide_fast(groupa, groupb, dokilla, dokillb):
+    """Equivalente di pygame.sprite.groupcollide (senza callback `collided`).
+
+    Stesso risultato e stesso ordine: sprite di A nell'ordine del gruppo,
+    bersagli nell'ordine di B, kill progressivi (un bersaglio ucciso da uno
+    sprite di A non e' piu' visibile ai successivi), kill di A alla fine.
+    Invece di una spritecollide Python per ogni sprite di A usa
+    Rect.collidelistall sui rect di B letti una sola volta.
+    Usata sia da GameEnv che da Game: tenerle allineate.
+    """
+    targets = groupb.sprites()
+    if not targets:
+        return {}
+    rects = [s.rect for s in targets]
+    alive = [True] * len(targets)
+    hits = {}
+    for a in groupa.sprites():
+        hit = []
+        for i in a.rect.collidelistall(rects):
+            if alive[i]:
+                hit.append(targets[i])
+                if dokillb:
+                    alive[i] = False
+        if hit:
+            if dokillb:
+                for s in hit:
+                    s.kill()
+            hits[a] = hit
+    if dokilla:
+        for a in hits:
+            a.kill()
+    return hits
+
+
 def build_observation(player, enemies, asteroids, enemy_bullets, powerups,
                       level_manager, now_ms):
     """Estrae 52 valori normalizzati dallo stato di gioco.
@@ -246,7 +280,7 @@ class GameEnv:
 
         return self.get_observation()
 
-    def step(self, actions):
+    def step(self, actions, draw=True):
         """Avanza di 1 frame con le azioni date.
 
         Args:
@@ -256,6 +290,8 @@ class GameEnv:
                 'shoot': bool
                 'missile': bool
                 'bomb': bool
+            draw: con render attivo, False salta il disegno del frame (lo
+                stato avanza comunque, sfondo compreso)
 
         Returns:
             (observation, reward_delta, done)
@@ -350,7 +386,7 @@ class GameEnv:
             self._prev_powerup_dist = None
 
         # Rendering opzionale
-        if self.render_mode and self.screen is not None:
+        if draw and self.render_mode and self.screen is not None:
             self._draw()
 
         return self.get_observation(), reward, self.done
@@ -461,7 +497,7 @@ class GameEnv:
             self.powerups.add(MissilePowerUp())
 
         # Collisioni proiettile-nemico
-        hits = pygame.sprite.groupcollide(self.bullets, self.enemies, True, True)
+        hits = groupcollide_fast(self.bullets, self.enemies, True, True)
         for bullet, enemies_hit in hits.items():
             self.score += len(enemies_hit) * 100
             self.enemies_killed += len(enemies_hit)
@@ -481,7 +517,7 @@ class GameEnv:
             missile.kill_positions.clear()
 
         # Collisioni proiettile-asteroide
-        ast_hits = pygame.sprite.groupcollide(self.bullets, self.asteroids, True, False)
+        ast_hits = groupcollide_fast(self.bullets, self.asteroids, True, False)
         for bullet in ast_hits:
             self.explosions.add(Explosion(bullet.rect.centerx, bullet.rect.centery))
 

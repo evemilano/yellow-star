@@ -1,5 +1,6 @@
 import math
 import random
+import threading
 import pygame
 from settings import (
     SCREEN_WIDTH, SCREEN_HEIGHT,
@@ -149,6 +150,27 @@ def _draw_star_field(surf: pygame.Surface, width: int, height: int,
             pygame.draw.circle(surf, (*tint, 60), (x, y), r + 2, 1)
 
 
+def _alpha_rows(surface: pygame.Surface):
+    """Prima riga e altezza della fascia con pixel non trasparenti (alpha > 0).
+
+    Stesse righe di get_bounding_rect(min_alpha=1), ma calcolate via mask:
+    get_bounding_rect scandisce i pixel uno a uno e costa 4-6 volte tanto.
+    Ritorna None se la superficie e' tutta trasparente.
+    """
+    mask = pygame.mask.from_surface(surface, 0)  # bit = alpha > 0
+    w, h = mask.get_size()
+    row = pygame.mask.Mask((w, 1), fill=True)
+    top = 0
+    while top < h and not mask.overlap_area(row, (0, top)):
+        top += 1
+    if top == h:
+        return None
+    bottom = h - 1
+    while not mask.overlap_area(row, (0, bottom)):
+        bottom -= 1
+    return top, bottom - top + 1
+
+
 # ── Layer scorrevole ──
 
 class ScrollingLayer:
@@ -182,6 +204,7 @@ class Biome:
     """
 
     name = "biome"
+    crop_layers = True  # ritaglio dei layer alla fascia non trasparente (add)
 
     def __init__(self, rng: random.Random):
         self.rng = rng
@@ -195,6 +218,17 @@ class Biome:
         raise NotImplementedError
 
     def add(self, surface: pygame.Surface, speed: float, y_offset: int = 0):
+        # Ritaglia le righe interamente trasparenti sopra e sotto il contenuto:
+        # molti layer occupano solo una fascia e il blit con alpha per-pixel
+        # costa per tutta l'altezza. I pixel con alpha 0 non cambiano la
+        # destinazione, quindi l'immagine resta identica; la larghezza (tile
+        # seamless) non cambia.
+        if self.crop_layers and surface.get_flags() & pygame.SRCALPHA:
+            rows = _alpha_rows(surface)
+            if rows is not None and rows[1] < surface.get_height():
+                top, height = rows
+                surface = surface.subsurface((0, top, surface.get_width(), height)).copy()
+                y_offset += top
         self.layers.append(ScrollingLayer(surface, speed, y_offset))
 
     def update(self, dt: float):
@@ -415,9 +449,9 @@ class CityBiome(Biome):
         """Alone caldo attorno alle sagome, per staccarle dallo skyline."""
         mask = pygame.mask.from_surface(surf)
         glow = pygame.Surface((w, h), pygame.SRCALPHA)
+        silhouette = mask.to_surface(
+            setcolor=(255, 186, 120, 70), unsetcolor=(0, 0, 0, 0))
         for dx, dy in ((-3, 0), (3, 0), (0, -3), (0, 3), (-2, -2), (2, 2)):
-            silhouette = mask.to_surface(
-                setcolor=(255, 186, 120, 70), unsetcolor=(0, 0, 0, 0))
             glow.blit(silhouette, (dx, dy))
         glow.blit(surf, (0, 0))
         surf.blit(glow, (0, 0))
@@ -709,6 +743,9 @@ class SpaceBiome(Biome):
     """Spazio profondo: nebulose, campi stellari e pianeti."""
 
     name = "spazio"
+    # Nebulose e stelle coprono tutta l'altezza: il ritaglio guadagnerebbe
+    # poco e la build dello spazio e' sincrona (non passa dal prebuild)
+    crop_layers = False
 
     def build(self):
         rng = self.rng
@@ -774,6 +811,10 @@ class SpaceBiome(Biome):
 SURFACE_BIOMES = [MountainBiome, SeaBiome, CityBiome,
                   JungleBiome, DesertBiome, ArcticBiome]
 
+# Anticipo (ms) con cui il bioma successivo viene costruito in un thread:
+# costruirlo nel frame dello switch (fino a ~90 ms) causava uno scatto
+BIOME_PREBUILD_LEAD = 5000.0
+
 
 # ── Gestore parallasse ──
 
@@ -794,6 +835,7 @@ class ParallaxBackground:
         self.fade = 0.0           # 0..1 avanzamento crossfade
         self.space_mode = False
         self._fade_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT)).convert_alpha()
+        self._prebuild = None     # (thread, risultato, classe, seed, stato da ripristinare)
 
     # -- costruzione biomi --
 
@@ -818,6 +860,46 @@ class ParallaxBackground:
             self.next = self._make(cls)
             self.fade = 0.0
 
+    def _start_prebuild(self):
+        """Avvia in un thread la costruzione del prossimo bioma terrestre.
+
+        Classe e seed si estraggono qui, nel main thread, nello stesso ordine
+        di _make(): bioma e stato di self.rng sono identici a una costruzione
+        sincrona allo switch. Le build usano solo il proprio random.Random e
+        non convertono superfici, quindi possono girare fuori dal main thread.
+        """
+        undo = (self.rng.getstate(), list(self._queue))
+        cls = self._next_class()
+        seed = self.rng.randrange(1 << 30)
+        result = {}
+
+        def build():
+            result['biome'] = cls(random.Random(seed))
+
+        thread = threading.Thread(target=build, daemon=True)
+        thread.start()
+        self._prebuild = (thread, result, cls, seed, undo)
+
+    def _finish_prebuild(self) -> Biome:
+        """Attende il prebuild (di norma gia' concluso) e ne ritorna il bioma."""
+        thread, result, cls, seed, _undo = self._prebuild
+        self._prebuild = None
+        thread.join()
+        if 'biome' not in result:
+            # Il thread e' fallito: ricostruisce qui, rialzando l'errore
+            return cls(random.Random(seed))
+        return result['biome']
+
+    def _discard_prebuild(self):
+        """Scarta il prebuild in corso e ripristina rng e coda come prima
+        dell'estrazione, cosi' il seed dello spazio resta quello di sempre."""
+        if self._prebuild is None:
+            return
+        rng_state, queue = self._prebuild[4]
+        self.rng.setstate(rng_state)
+        self._queue = queue
+        self._prebuild = None
+
     # -- API pubblica --
 
     @property
@@ -836,11 +918,17 @@ class ParallaxBackground:
         if not self.space_mode and level >= BIOME_SPACE_LEVEL:
             self.space_mode = True
             self.next = None
+            self._discard_prebuild()
             self._start_fade(SpaceBiome)
             self.timer = 0.0
 
-        if self.next is None and not self.space_mode and self.timer >= BIOME_DURATION:
-            self._start_fade(self._next_class())
+        if self.next is None and not self.space_mode:
+            # Il bioma successivo si costruisce in background prima dello switch
+            if self._prebuild is None and self.timer >= BIOME_DURATION - BIOME_PREBUILD_LEAD:
+                self._start_prebuild()
+            if self.timer >= BIOME_DURATION:
+                self.next = self._finish_prebuild()
+                self.fade = 0.0
 
         self.current.update(dt)
         if self.next is not None:

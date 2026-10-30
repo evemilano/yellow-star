@@ -10,9 +10,14 @@ from settings import (
 class MissilePowerUp(pygame.sprite.Sprite):
     """Power-up raccoglibile che dà un missile al giocatore."""
 
+    # Sprite generato una volta e condiviso tra le istanze (mai modificato)
+    _sprite_cache: pygame.Surface | None = None
+
     def __init__(self):
         super().__init__()
-        self.image = self._create_sprite()
+        if MissilePowerUp._sprite_cache is None:
+            MissilePowerUp._sprite_cache = self._create_sprite()
+        self.image = MissilePowerUp._sprite_cache
         self.rect = self.image.get_rect(
             center=(
                 SCREEN_WIDTH + 30,
@@ -90,9 +95,14 @@ class MissilePowerUp(pygame.sprite.Sprite):
 class Missile(pygame.sprite.Sprite):
     """Missile lanciato dal giocatore: vola verso destra e cerca i nemici."""
 
+    # Sprite generato una volta e condiviso tra le istanze (mai modificato)
+    _sprite_cache: pygame.Surface | None = None
+
     def __init__(self, x: int, y: int, enemies: pygame.sprite.Group):
         super().__init__()
-        self.image = self._create_sprite()
+        if Missile._sprite_cache is None:
+            Missile._sprite_cache = self._create_sprite()
+        self.image = Missile._sprite_cache
         self.rect = self.image.get_rect(center=(x, y))
         self.speed = MISSILE_SPEED
         self.kills_left = MISSILE_KILL_COUNT
