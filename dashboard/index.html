@@ -777,7 +777,7 @@ function renderVerdict(all, D) {
   const maxStag = D.static.max_stagnation;
   const [tMin, tMax] = speciesTarget(D.static);
   if (sp.n < tMin) items.push({ lv: 'warn', t: `Solo ${sp.n} specie, sotto l'obiettivo di ${tMin}–${tMax}: poca diversità. La soglia di compatibilità si abbassa da sola per crearne di nuove.` });
-  else if (sp.n > tMax) items.push({ lv: 'warn', t: `${sp.n} specie, sopra l'obiettivo di ${tMin}–${tMax}: specie piccole, che perdono facilmente le linee migliori. La soglia di compatibilità si alza da sola per unirle.` });
+  else if (sp.n > tMax) items.push({ lv: 'warn', t: `${sp.n} specie, sopra l'obiettivo di ${tMin}–${tMax}: specie piccole, che perdono facilmente le linee migliori. La soglia di compatibilità si alza da sola per non crearne altre; quelle in più spariscono quando smettono di migliorare.` });
   else if (sp.max_stag >= maxStag - 3) items.push({ lv: 'warn', t: `${sp.n} specie. Almeno una non migliora da ${sp.max_stag} generazioni: NEAT la elimina a ${maxStag}, salvo le ${D.static.species_elitism} migliori che restano protette.` });
   else items.push({ lv: 'good', t: `${sp.n} specie attive, nessuna vicina all'eliminazione per stallo (al massimo ${sp.max_stag} generazioni senza migliorare su ${maxStag}).` });
   // ritmo
@@ -1076,6 +1076,8 @@ function renderNets(H, D, C, mk) {
       series: [{ name: 'Media', color: C.val, k: 'net.nodes_mean' }, { name: 'Massimo', color: C.faint, k: 'net.nodes_max', dash: '5 4' }] },
     { id: 'n-conns', t: 'Connessioni attive', how: "Collegamenti attivi per rete. Una crescita lenta e costante è normale; un'esplosione senza miglioramenti indica reti gonfie.",
       series: [{ name: 'Media', color: C.val, k: 'net.conns_mean' }, { name: 'Massimo', color: C.faint, k: 'net.conns_max', dash: '5 4' }] },
+    { id: 'n-inputs', t: 'Input usati', how: `Quanti dei ${D.static.num_inputs || 28} valori osservati (stato della nave, pericolo nelle corsie, nemici, power-up) la rete legge davvero. Con pochi input la nave non vede le minacce e può solo ripetere una strategia fissa.`,
+      series: [{ name: 'Media', color: C.val, k: 'net.inputs_mean' }, { name: 'Massimo', color: C.faint, k: 'net.inputs_max', dash: '5 4' }] },
     { id: 'n-imit', t: 'Bonus di imitazione', how: `Premio per la somiglianza con le partite umane migliori, oltre quella dovuta al caso (massimo ${D.static.imitation_max_bonus}, dalla generazione ${D.static.imitation_start_gen}).`,
       series: [{ name: 'Media', color: C.top, k: 'imit.mean' }, { name: 'Massimo', color: C.faint, k: 'imit.max', dash: '5 4' }] },
     { id: 'n-time', t: 'Durata di una generazione', how: 'Secondi per valutare e validare una generazione. Cresce quando i genomi sopravvivono più a lungo, perché le partite durano di più.', unit: ' s',
@@ -1110,7 +1112,7 @@ function renderGuide(D) {
   const s = D.static;
   const g = [
     ['Generazione', `Un ciclo dell'evoluzione: tutti i ${nf(s.pop_size)} genomi giocano, i migliori si riproducono (con mutazioni e incroci) e formano la generazione successiva. I ${s.elitism} migliori di ogni specie passano invariati.`],
-    ['Genoma e rete', 'Un genoma descrive una rete neurale: 52 valori letti dal gioco in ingresso (posizione, nemici, proiettili, power-up…), 5 comandi in uscita (movimento verticale e orizzontale, sparo, missile, bomba).'],
+    ['Genoma e rete', 'Un genoma descrive una rete neurale: 28 valori letti dal gioco in ingresso (stato della nave, pericolo nelle 7 corsie attorno alla nave, nemici, power-up), 5 comandi in uscita (movimento verticale e orizzontale, sparo, missile, bomba).'],
     ['Fitness', 'Il punteggio con cui NEAT sceglie chi si riproduce: somma di premi e penalità (vedi la scomposizione). Non è lo score di gioco, anche se ne segue l\'andamento.'],
     ['Partite di training', `Ogni generazione usa ${s.episodes_per_genome} partite nuove, uguali per tutti i genomi: il confronto tra genomi è equo, ma da una generazione all'altra la difficoltà cambia e i valori oscillano.`],
     ['Validazione e record', s.confirmation_seeds

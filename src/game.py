@@ -21,7 +21,7 @@ from src.scores import load_scores, save_score
 from src.level import LevelManager
 from src.powerup import PowerUp
 from src.sounds import SoundManager
-from src.game_env import build_observation, groupcollide_fast, MS_PER_FRAME
+from src.game_env import build_observation, groupcollide_fast, MS_PER_FRAME, OBS_VERSION
 
 # Passo fisso: Game.run esegue _update(1.0) ogni MS_PER_FRAME ms di tempo reale
 # (lo stesso frame virtuale di GameEnv), al massimo MAX_SIM_STEPS volte per frame
@@ -821,6 +821,11 @@ class Game:
             )
             with open(BEST_GENOME_PATH, 'rb') as f:
                 genome = pickle.load(f)
+            # Un genoma allenato su un altro layout dell'osservazione gira
+            # (stesse chiavi di input) ma legge valori con un altro significato
+            obs_version = getattr(genome, 'obs_version', 1)
+            if obs_version != OBS_VERSION:
+                raise ValueError(f"genoma per l'osservazione v{obs_version}, attuale v{OBS_VERSION}")
             # Rete compilata: funzione obs -> output (stessi valori di activate)
             net = compile_network(genome, config)
             # Prova su un'osservazione reale: alcune incompatibilità emergono
@@ -836,7 +841,7 @@ class Game:
         return True
 
     def _get_ai_observation(self):
-        """Estrae 52 valori normalizzati per la rete AI (stesso formato di GameEnv)."""
+        """Osservazione per la rete AI (build_observation, stesso formato di GameEnv)."""
         return build_observation(
             self.ai_player, self.enemies, self.asteroids,
             self.enemy_bullets, self.powerups,

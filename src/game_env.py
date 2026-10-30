@@ -15,8 +15,6 @@ from settings import (
     POWERUP_DROP_CHANCE,
     BOMB_FREEZE_DURATION, BOMB_FIELD_DURATION,
     AI_MISSILE_INTERVAL,
-    LEVEL_MAX,
-    ENEMY_BULLET_SPEED,
 )
 from src.player import Player
 from src.enemy import Enemy
@@ -76,91 +74,129 @@ def groupcollide_fast(groupa, groupb, dokilla, dokillb):
     return hits
 
 
+# Versione del layout di build_observation: cambia quando cambiano numero,
+# ordine o significato dei valori. Genomi, checkpoint e sessioni umane di
+# un'altra versione non sono utilizzabili (vedi NeatTrainer e HumanRecorder)
+OBS_VERSION = 2
+OBS_SIZE = 28
+
+# Sensori a corsie: fasce orizzontali alte LANE_HEIGHT px centrate sulla nave
+# (corsia 0) e sopra/sotto (-3..+3). Nemici e asteroidi si muovono solo in
+# orizzontale, quindi una minaccia in una corsia resta in quella corsia
+LANE_HEIGHT = 40
+LANE_COUNT = 7
+LANE_RANGE = SCREEN_WIDTH / 2  # distanza a cui la vicinanza scende a 0
+LEVEL_OBS_CAP = 20
+
+
+def _lane_danger(player_rect, threats):
+    """Vicinanza (0-1) della minaccia piu' vicina davanti in ogni corsia.
+
+    Per ogni corsia k in -3..+3, la fascia [cy + (k - 0.5) * LANE_HEIGHT,
+    cy + (k + 0.5) * LANE_HEIGHT]: 1 - distanza / LANE_RANGE della minaccia
+    (rect) che la interseca e non e' ancora passata dietro la nave
+    (right >= left della nave), 1 se e' gia' sovrapposta in orizzontale.
+    Le corsie fuori dallo schermo valgono 1 (bloccate).
+    """
+    cy = player_rect.centery
+    left, right = player_rect.left, player_rect.right
+    half = LANE_COUNT // 2
+    bands = [(cy + (k - 0.5) * LANE_HEIGHT, cy + (k + 0.5) * LANE_HEIGHT)
+             for k in range(-half, half + 1)]
+    danger = [1.0 if top >= SCREEN_HEIGHT or bottom <= 0 else 0.0 for top, bottom in bands]
+    lo_band, hi_band = bands[0][0], bands[-1][1]
+    for r in threats:
+        if r.right < left or r.bottom <= lo_band or r.top >= hi_band:
+            continue
+        gap = r.left - right
+        prox = 1.0 if gap <= 0 else 1.0 - gap / LANE_RANGE
+        if prox <= 0.0:
+            continue
+        for i, (top, bottom) in enumerate(bands):
+            if r.bottom > top and r.top < bottom and prox > danger[i]:
+                danger[i] = prox
+    return danger
+
+
 def build_observation(player, enemies, asteroids, enemy_bullets, powerups,
                       level_manager, now_ms):
-    """Estrae 52 valori normalizzati dallo stato di gioco.
+    """Estrae OBS_SIZE (28) valori normalizzati dallo stato di gioco.
 
-    Funzione standalone usata sia da GameEnv che da HumanRecorder
-    per garantire coerenza nel vettore di osservazione.
+    Funzione standalone usata da GameEnv, da HumanRecorder e dalla nave AI in
+    coop: e' l'unica fonte del vettore di osservazione.
 
     Args:
         player: Player con rect, lives, shield_hp, upgrades, missiles, bombs, last_shot
         enemies: sprite Group di nemici
         asteroids: sprite Group di asteroidi
         enemy_bullets: sprite Group di proiettili nemici
-        powerups: sprite Group di power-up
+        powerups: sprite Group di power-up (potenziamenti e missili)
         level_manager: LevelManager con .level
         now_ms: tempo corrente in millisecondi (virtuale o reale)
 
-    Layout:
-      [0..7]   Player state base (8)
-      [8..13]  Player state esteso: cooldown, densita', upgrade (6)
-      [14..25] 3 nemici: dx, dy, speed, is_shooter (12)
-      [26..37] 3 asteroidi: dx, dy, speed, size (12)
-      [38..49] 3 proiettili nemici: dx, dy, vx, vy (12)
-      [50..51] 1 power-up piu' vicino: dx, dy (2)
-    Totale: 52
+    Layout (OBS_VERSION 2):
+      [0..11]  nave: x, y, vite, scudo/max, invincibile, missili/3, bombe/3,
+               livello/20, cooldown dello sparo, livelli arma, motore, scudo /10
+      [12..18] pericolo nelle 7 corsie dall'alto (-3) al basso (+3), corsia
+               della nave al centro: vicinanza 0-1 di nemici, asteroidi e
+               proiettili nemici davanti (_lane_danger)
+      [19..22] 2 nemici piu' vicini: dx, dy
+      [23..25] potenziamento (arma/motore/scudo) piu' vicino: presente, dx, dy
+      [26..27] pickup missili piu' vicino: dx, dy
+    Totale: 28. La versione 1 (52 valori: 3 nemici, 3 asteroidi e 3 proiettili
+    per distanza, un solo power-up di qualsiasi tipo) lasciava alle reti il
+    calcolo di "minaccia nella mia corsia": la popolazione restava ferma al
+    bordo sinistro e non inseguiva i power-up.
     """
-    px = player.rect.centerx
-    py = player.rect.centery
+    rect = player.rect
+    px = rect.centerx
+    py = rect.centery
 
-    # Player state base (8 valori)
     shield_max = max(1, player.upgrades.shield_max)
+    shoot_delay = player.upgrades.shoot_delay
+    shoot_cooldown = max(0.0, 1.0 - (now_ms - player.last_shot) / shoot_delay)
+    levels = player.upgrades.levels
     obs = [
         px / SCREEN_WIDTH,
         py / SCREEN_HEIGHT,
         player.lives / PLAYER_LIVES,
-        player.shield_hp / shield_max if shield_max > 0 else 0.0,
+        player.shield_hp / shield_max,
         1.0 if player.invincible else 0.0,
         min(player.missiles, 3) / 3.0,
         min(player.bombs, 3) / 3.0,
-        level_manager.level / LEVEL_MAX,
+        min(level_manager.level, LEVEL_OBS_CAP) / LEVEL_OBS_CAP,
+        shoot_cooldown,
+        levels["weapon"] / 10.0,
+        levels["engine"] / 10.0,
+        levels["shield"] / 10.0,
     ]
 
-    # Player state esteso (6 valori)
-    shoot_delay = player.upgrades.shoot_delay
-    time_since_shot = now_ms - player.last_shot
-    shoot_cooldown = max(0.0, 1.0 - time_since_shot / shoot_delay)
-    obs.append(shoot_cooldown)
-    obs.append(min(len(enemies), 10) / 10.0)
-    obs.append(min(len(enemy_bullets), 10) / 10.0)
-    obs.append(player.upgrades.levels["weapon"] / 10.0)
-    obs.append(player.upgrades.levels["engine"] / 10.0)
-    obs.append(player.upgrades.levels["shield"] / 10.0)
+    threats = [s.rect for s in enemies]
+    threats += [s.rect for s in asteroids]
+    threats += [s.rect for s in enemy_bullets]
+    obs.extend(_lane_danger(rect, threats))
 
-    # 3 nemici piu' vicini (4 valori ciascuno: dx, dy, speed, is_shooter)
-    nearest_enemies = _nearest_n(enemies, px, py, 3)
+    nearest_enemies = _nearest_n(enemies, px, py, 2)
     for e in nearest_enemies:
         obs.append((e.rect.centerx - px) / SCREEN_WIDTH)
         obs.append((e.rect.centery - py) / SCREEN_HEIGHT)
-        obs.append(e.speed / 10.0)
-        obs.append(1.0 if e.shoot_type != "none" else 0.0)
-    obs.extend([0.0, 0.0, 0.0, 0.0] * (3 - len(nearest_enemies)))
+    obs.extend([0.0, 0.0] * (2 - len(nearest_enemies)))
 
-    # 3 asteroidi piu' vicini (4 valori ciascuno: dx, dy, speed, size)
-    nearest_asteroids = _nearest_n(asteroids, px, py, 3)
-    for a in nearest_asteroids:
-        obs.append((a.rect.centerx - px) / SCREEN_WIDTH)
-        obs.append((a.rect.centery - py) / SCREEN_HEIGHT)
-        obs.append(a.speed / 10.0)
-        obs.append(a.radius / 65.0)
-    obs.extend([0.0, 0.0, 0.0, 0.0] * (3 - len(nearest_asteroids)))
-
-    # 3 proiettili nemici piu' vicini (4 valori: dx, dy, vx, vy)
-    nearest_bullets = _nearest_n(enemy_bullets, px, py, 3)
-    for b in nearest_bullets:
-        obs.append((b.rect.centerx - px) / SCREEN_WIDTH)
-        obs.append((b.rect.centery - py) / SCREEN_HEIGHT)
-        obs.append(b.vx / ENEMY_BULLET_SPEED)
-        obs.append(b.vy / ENEMY_BULLET_SPEED)
-    obs.extend([0.0, 0.0, 0.0, 0.0] * (3 - len(nearest_bullets)))
-
-    # 1 power-up piu' vicino (2 valori: dx, dy)
-    nearest_pu = _nearest_n(powerups, px, py, 1)
-    if nearest_pu:
-        pu = nearest_pu[0]
-        obs.append((pu.rect.centerx - px) / SCREEN_WIDTH)
-        obs.append((pu.rect.centery - py) / SCREEN_HEIGHT)
+    upgrades, missiles = [], []
+    for s in powerups:
+        (missiles if isinstance(s, MissilePowerUp) else upgrades).append(s)
+    nearest = min(upgrades, key=lambda s: (s.rect.centerx - px) ** 2 + (s.rect.centery - py) ** 2,
+                  default=None)
+    if nearest is not None:
+        obs.extend([1.0, (nearest.rect.centerx - px) / SCREEN_WIDTH,
+                    (nearest.rect.centery - py) / SCREEN_HEIGHT])
+    else:
+        obs.extend([0.0, 0.0, 0.0])
+    nearest = min(missiles, key=lambda s: (s.rect.centerx - px) ** 2 + (s.rect.centery - py) ** 2,
+                  default=None)
+    if nearest is not None:
+        obs.extend([(nearest.rect.centerx - px) / SCREEN_WIDTH,
+                    (nearest.rect.centery - py) / SCREEN_HEIGHT])
     else:
         obs.extend([0.0, 0.0])
 
@@ -666,7 +702,7 @@ class GameEnv:
             self.bomb_field_until = self.frame_count + int(BOMB_FIELD_DURATION / MS_PER_FRAME)
 
     def get_observation(self):
-        """Estrae 52 valori normalizzati dallo stato corrente."""
+        """Osservazione dello stato corrente (build_observation, OBS_SIZE valori)."""
         return build_observation(
             self.player, self.enemies, self.asteroids,
             self.enemy_bullets, self.powerups,

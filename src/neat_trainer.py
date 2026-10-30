@@ -11,6 +11,7 @@ Gestisce:
 
 import datetime
 import glob
+import itertools
 import gzip
 import json
 import math
@@ -23,7 +24,7 @@ import multiprocessing
 import neat
 import pygame
 from settings import SCREEN_WIDTH, SCREEN_HEIGHT, FPS
-from src.game_env import GameEnv
+from src.game_env import GameEnv, OBS_VERSION
 from src.training_dashboard import TrainingDashboard
 
 AI_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai")
@@ -59,12 +60,14 @@ HEADLESS_POP_SIZE = 200
 EPISODES_PER_GENOME = 4
 
 # Speciazione: numero di specie che il threshold adattivo cerca di mantenere
-# (_check_and_fix_stagnation), con passo moltiplicativo per generazione
+# (_check_and_fix_stagnation). Il threshold si calibra sulle distanze della
+# generazione: con un passo fisso del 5% il numero di specie oscillava tra 3
+# e 12 (le specie in eccesso spariscono solo per stagnazione, in ritardo)
 SPECIES_TARGET_MIN = 5
 SPECIES_TARGET_MAX = 10
-THRESHOLD_STEP = 0.05
-THRESHOLD_MIN = 1.0
-THRESHOLD_MAX = 6.0
+THRESHOLD_MIN = 0.3
+THRESHOLD_MAX = 8.0
+THRESHOLD_MAX_DROP = 0.15  # discesa massima per generazione (la salita e' libera)
 
 # Terminazione anticipata genomi scarsi (check periodico, in secondi di gioco)
 EARLY_STOP_INTERVAL = int(5 * FPS)   # controlla ogni 5 secondi
@@ -85,7 +88,7 @@ IMITATION_WEIGHT_CAP = 4.0           # peso = min(tetto, ln(1 + score / 1000))
 # salvato con un'altra versione non e' confrontabile e viene ricalcolato;
 # riprendendo un checkpoint di un'altra versione si azzera lo storico di
 # fitness delle specie (vedi NeatTrainer._reset_species_history)
-FITNESS_VERSION = 4
+FITNESS_VERSION = 6
 
 # Validazione del best in due fasi, su episodi interi (MAX_FRAMES_PER_EPISODE,
 # niente early stop, niente imitation) con seed fissi fuori dalla serie del
@@ -102,6 +105,14 @@ VALIDATION_TOP_K = 5
 VALIDATION_SEEDS = tuple(range(10 ** 9, 10 ** 9 + 10))
 CONFIRMATION_SEEDS = tuple(range(10 ** 9 + 1000, 10 ** 9 + 1040))
 
+
+# Peso dei power-up raccolti e del saldo di avvicinamento (fitness v5, prima
+# 50 e 3): lo stesso genoma con arma, scudo e motore al livello 6 fa 10058
+# punti e 122 s invece di 2925 e 52 s (~400-650 punti di partita per livello),
+# ma il premio di 70 per raccolta non si vedeva in episodi di ~50 s e l'AI
+# raccoglieva ~1 power-up a partita contro i 30 dei giocatori umani
+POWERUP_WEIGHT = 250
+PU_APPROACH_WEIGHT = 10
 
 # Componenti di _compute_fitness come li spiega la dashboard: tenerli allineati
 # ai pesi qui sotto. (chiave, nome, peso, descrizione)
@@ -120,7 +131,7 @@ FITNESS_COMPONENTS = (
      "Ogni vita persa."),
     ('comp_level', "Livello raggiunto", "+50 × livello²",
      "Il livello sale con lo score: premia la progressione nel gioco."),
-    ('comp_powerups', "Potenziamenti raccolti", "+50 ciascuno",
+    ('comp_powerups', "Potenziamenti raccolti", f"+{POWERUP_WEIGHT} ciascuno",
      "Power-up di arma, motore o scudo raccolti."),
     ('comp_missiles', "Missili raccolti", "+30 ciascuno",
      "Power-up dei missili raccolti."),
@@ -134,7 +145,7 @@ FITNESS_COMPONENTS = (
      "Nemici o asteroidi passati entro 60 px e usciti senza colpire."),
     ('comp_near_misses', "Passaggi ravvicinati", "+3 ciascuno",
      "Minacce arrivate entro 60 px dalla nave."),
-    ('comp_pu_approach', "Avvicinamento ai power-up", "+3 al secondo netto",
+    ('comp_pu_approach', "Avvicinamento ai power-up", f"+{PU_APPROACH_WEIGHT} al secondo netto",
      "Saldo dei secondi passati ad avvicinarsi al power-up più vicino (mai negativo)."),
     ('comp_shoot_penalty', "Raffiche sparate", "−0,01 per raffica",
      "Piccolo costo per ogni raffica, contro lo sparo continuo inutile."),
@@ -155,10 +166,10 @@ def _compute_fitness(env):
         + accuracy x uccisioni a proiettile x 10
         + schivate x 5 (passaggi ravvicinati senza collisione)
         + secondi x 1.5 - vite perse x 200 + livello^2 x 50
-        + power-up x 50 + missili raccolti x 30 + livelli upgrade x 20
+        + power-up x POWERUP_WEIGHT (250) + missili raccolti x 30 + livelli upgrade x 20
         - colpi allo scudo x 15 - scudi rotti x 120
         - secondi fermo x 15 + near-miss x 3
-        + saldo netto (>= 0) dei secondi in avvicinamento a un power-up x 3
+        + saldo netto (>= 0) dei secondi in avvicinamento a un power-up x PU_APPROACH_WEIGHT (10)
         - raffiche x 0.01
 
     Ritorna (fitness, env_stats).
@@ -178,13 +189,13 @@ def _compute_fitness(env):
         'comp_frames': env.frame_count / FPS * 1.5,
         'comp_lives': -env.lives_lost * 200,
         'comp_level': env.level_manager.level ** 2 * 50,
-        'comp_powerups': env.powerups_collected * 50,
+        'comp_powerups': env.powerups_collected * POWERUP_WEIGHT,
         'comp_missiles': env.missiles_collected * 30,
         'comp_upgrades': env.total_upgrade_levels * 20,
         'comp_shield': -(env.shield_hits * 15 + env.shield_breaks * 120),
         'comp_idle': -(env.idle_frames / FPS * 15),
         'comp_near_misses': env.near_misses * 3,
-        'comp_pu_approach': max(0, env.powerup_approach_frames) / FPS * 3,
+        'comp_pu_approach': max(0, env.powerup_approach_frames) / FPS * PU_APPROACH_WEIGHT,
         'comp_shoot_penalty': -env.shots_fired * 0.01,
     }
     # NON clippare a 0: i genomi pessimi devono avere fitness negativa
@@ -389,6 +400,70 @@ def compile_network(genome, config):
     lines.append(f"    return [{outs}]")
     exec(compile("\n".join(lines), "<neat-net>", "exec"), ns)
     return ns["act"]
+
+
+def _prune_unexpressed(genome, config):
+    """Elimina i geni che non entrano nella rete espressa (fenotipo invariato).
+
+    Tiene le uscite, i nodi valutati da FeedForwardNetwork.create e le sole
+    connessioni che quei nodi leggono: spariscono le connessioni disabilitate,
+    i nodi senza percorso verso un'uscita e i loro collegamenti. La rete
+    compilata resta identica bit per bit (stessi nodi, stessi link nello
+    stesso ordine). Senza potatura le reti accumulavano ~90 nodi e ~440
+    connessioni con ~13 espresse: mutate_add_connection sceglie la
+    destinazione tra tutti i nodi, quindi quasi ogni mutazione strutturale
+    finiva su geni morti, e la popolazione usava in mediana 6 input su 52.
+    """
+    net = neat.nn.FeedForwardNetwork.create(genome, config)
+    keep_nodes = set(config.genome_config.output_keys)
+    keep_conns = set()
+    for node, _act, _agg, _bias, _resp, links in net.node_evals:
+        keep_nodes.add(node)
+        keep_conns.update((i, node) for i, _w in links)
+    for key in [k for k in genome.connections if k not in keep_conns]:
+        del genome.connections[key]
+    for key in [k for k in genome.nodes if k not in keep_nodes]:
+        del genome.nodes[key]
+
+
+def _distance_matrix(genomes, genome_config):
+    """Distanze genetiche (DefaultGenome.distance) tra tutte le coppie."""
+    n = len(genomes)
+    dist = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        gi, row = genomes[i], dist[i]
+        for j in range(i + 1, n):
+            row[j] = dist[j][i] = gi.distance(genomes[j], genome_config)
+    return dist
+
+
+def _greedy_species_count(dist, threshold):
+    """Specie che si formerebbero da zero con `threshold`.
+
+    Stesso criterio di DefaultSpeciesSet: un genoma entra nella specie del
+    primo rappresentante a distanza < threshold, altrimenti ne fonda una.
+    """
+    reps = []
+    for i, row in enumerate(dist):
+        if all(row[r] >= threshold for r in reps):
+            reps.append(i)
+    return len(reps)
+
+
+def _threshold_for_species(dist, target):
+    """Threshold piu' basso che forma al massimo `target` specie (bisezione)."""
+    lo, hi = THRESHOLD_MIN, THRESHOLD_MAX
+    if _greedy_species_count(dist, lo) <= target:
+        return lo
+    if _greedy_species_count(dist, hi) > target:
+        return hi
+    for _ in range(20):
+        mid = (lo * hi) ** 0.5
+        if _greedy_species_count(dist, mid) <= target:
+            hi = mid
+        else:
+            lo = mid
+    return hi
 
 
 # Componenti confrontate dall'imitation bonus e loro valori: missile e bomba
@@ -680,6 +755,9 @@ class NeatTrainer:
         self._last_validation = None
         self._last_confirmation = None
         self._pool = None
+        # Fitness accumulata per genome.key dei genomi della generazione
+        # corrente: (somma fitness, somma fitness di gioco, generazioni giocate)
+        self._fit_hist = {}
 
     def _init_fonts(self):
         if self._font is None:
@@ -710,8 +788,9 @@ class NeatTrainer:
         # impostata prima del restore, che riparte da self.config
         if headless:
             self.config.pop_size = HEADLESS_POP_SIZE
-        # Versione della fitness, salvata nei checkpoint con la config
+        # Versioni di fitness e osservazione, salvate nei checkpoint con la config
         self.config.fitness_version = FITNESS_VERSION
+        self.config.obs_version = OBS_VERSION
 
         # Cerca checkpoint per riprendere
         checkpoint, saved_config = self._find_latest_checkpoint()
@@ -728,6 +807,7 @@ class NeatTrainer:
             # Lo species set ripristinato ha ancora la species_set_config del
             # pickle: senza questo il threshold non agirebbe sulla speciazione
             p.species.species_set_config = p.config.species_set_config
+            self._restore_node_indexer(p, saved_config)
             # Sincronizza generazione interna con il checkpoint
             self.generation = p.generation
             print(f"  Generazione ripristinata: {self.generation}, "
@@ -794,6 +874,27 @@ class NeatTrainer:
         # Il miglior genoma e' gia' salvato incrementalmente in _eval_genomes
         if self.best_genome and self.best_fitness > -math.inf:
             print(f"\nRecord di validazione: {self.best_fitness:.1f}")
+
+    @staticmethod
+    def _restore_node_indexer(p, saved_config):
+        """Riprende il contatore delle chiavi dei nodi dopo il restore.
+
+        restore_checkpoint con new_config trasferisce il tracker delle
+        innovazioni ma non il node_indexer della config pickled: neat lo
+        ricreerebbe dal massimo dei nodi del primo genoma mutato e, con le
+        reti potate (_prune_unexpressed), riuserebbe chiavi di nodi presenti
+        in altri genomi (AssertionError in get_new_node_key). Riparte dal
+        massimo tra il contatore salvato e le chiavi della popolazione e dei
+        rappresentanti delle specie.
+        """
+        gc = p.config.genome_config
+        genomes = list(p.population.values())
+        genomes += [s.representative for s in p.species.species.values() if s.representative]
+        next_id = max((k for g in genomes for k in g.nodes), default=gc.num_outputs - 1) + 1
+        saved = getattr(saved_config.genome_config, 'node_indexer', None)
+        if saved is not None:
+            next_id = max(next_id, next(saved))
+        gc.node_indexer = itertools.count(next_id)
 
     @staticmethod
     def _reset_species_history(p, saved_version):
@@ -886,6 +987,14 @@ class NeatTrainer:
                 self._collect_stats(genome, env_stats)
                 self._set_progress('valutazione', idx + 1, total)
 
+        # Fitness media su tutte le generazioni giocate (elite riportate)
+        self._average_fitness(genomes, game_fitness)
+
+        # Potatura dei geni inespressi: la rete di ogni genoma non cambia, le
+        # mutazioni della generazione dopo agiscono sulla rete vera
+        for _genome_id, genome in genomes:
+            _prune_unexpressed(genome, config)
+
         # Validazione dei migliori: salva best_genome.pkl se batte il record
         self._new_record_this_gen = self._validate_top_genomes(genomes, game_fitness, config)
 
@@ -898,12 +1007,38 @@ class NeatTrainer:
         self.generation += 1
 
         # Controllo speciazione (threshold adattivo)
-        self._check_and_fix_stagnation(config)
+        self._check_and_fix_stagnation(config, [g for _, g in genomes])
 
         # In headless: aggiorna schermata fine generazione
         if self._headless and self.screen:
             self._draw_stats_screen()
             pygame.display.flip()
+
+    def _average_fitness(self, genomes, game_fitness):
+        """Fitness = media di tutte le generazioni giocate dal genoma.
+
+        Le elite passano identiche (stesso oggetto, stessa key) alla
+        generazione dopo e rigiocano i nuovi seed: la loro fitness diventa la
+        media di tutti gli episodi giocati, quella dei genomi nuovi resta la
+        media dei loro EPISODES_PER_GENOME. Un singolo link utile vale ~+600
+        di fitness, ma la differenza tra due reti cambia di ~1100 da una
+        partita all'altra anche sugli stessi seed: con 4 episodi elite e
+        genitori erano scelti in buona parte dal caso. Aggiorna anche
+        game_fitness (classifica della validazione) e le righe della
+        dashboard; lo storico tiene solo i genomi della generazione.
+        """
+        hist = {}
+        for idx, (_genome_id, genome) in enumerate(genomes):
+            total, game, n = self._fit_hist.get(genome.key, (0.0, 0.0, 0))
+            total += genome.fitness
+            game += game_fitness[idx]
+            n += 1
+            hist[genome.key] = (total, game, n)
+            genome.fitness = total / n
+            game_fitness[idx] = game / n
+        self._fit_hist = hist
+        for row in self._gen_rows:
+            row['fitness'] = row['genome'].fitness
 
     def _poll_interrupt(self):
         """Svuota la coda eventi: ESC o chiusura finestra interrompono il training."""
@@ -1021,6 +1156,13 @@ class NeatTrainer:
             print(f"best_genome.pkl non caricabile, record azzerato: {e!r}")
             self.best_genome = None
             return
+        obs_version = getattr(self.best_genome, 'obs_version', 1)
+        if obs_version != OBS_VERSION:
+            # Rivalutarlo darebbe un record senza senso: legge valori diversi
+            print(f"best_genome.pkl e' per l'osservazione v{obs_version}, attuale "
+                  f"v{OBS_VERSION}: record azzerato, il primo genoma confermato lo sostituisce")
+            self.best_genome = None
+            return
 
         meta = self._read_best_meta()
         if meta is not None:
@@ -1087,6 +1229,9 @@ class NeatTrainer:
     def _save_best_genome(self, genome, mean, per_seed, stats=None):
         """Salva best_genome.pkl (stesso formato: il genoma pickled) e il sidecar."""
         os.makedirs(AI_DIR, exist_ok=True)
+        # Layout dell'osservazione: la coop e la ripresa rifiutano i genomi
+        # di un'altra versione (girerebbero, ma leggendo altri valori)
+        genome.obs_version = OBS_VERSION
         tmp = BEST_GENOME_PATH + '.tmp'
         with open(tmp, 'wb') as f:
             pickle.dump(genome, f)
@@ -1174,34 +1319,52 @@ class NeatTrainer:
         fitness = sum(f for f, _ in results) / len(results)
         return fitness, _mean_stats([s for _, s in results])
 
-    def _check_and_fix_stagnation(self, config):
+    def _check_and_fix_stagnation(self, config, genomes):
         """Controllo della speciazione: adatta il compatibility threshold.
 
         Agisce sulla speciazione della generazione successiva perche' lo
         species set usa config.species_set_config (anche dopo il restore, vedi
         train()). La stagnazione delle specie la gestisce neat
         (DefaultStagnation: max_stagnation, species_elitism).
+
+        Tiene le specie tra SPECIES_TARGET_MIN e SPECIES_TARGET_MAX (con 20
+        specie da ~10 genomi le linee migliori si estinguevano in ~20
+        generazioni). Il threshold si calibra sulle distanze di `genomes`
+        (la generazione appena valutata): i valori che da zero formerebbero
+        SPECIES_TARGET_MAX, il punto medio e SPECIES_TARGET_MIN specie. Con
+        poche specie scende al valore del punto medio, con troppe sale al
+        valore del punto medio (le specie esistenti restano e spariscono solo
+        per stagnazione), altrimenti resta nella fascia tra gli estremi. Un
+        passo fisso reagiva al numero di specie, che cambia in ritardo, e
+        oscillava tra 3 e 12 specie.
         """
-        if not self._population:
+        if not self._population or len(genomes) < 2:
             return
 
-        species_set = self._population.species
-        num_species = len(species_set.species)
+        num_species = len(self._population.species.species)
         threshold = config.species_set_config.compatibility_threshold
-
-        # Tiene le specie tra SPECIES_TARGET_MIN e SPECIES_TARGET_MAX: con 20
-        # specie da ~10 genomi le linee migliori si estinguevano in ~20
-        # generazioni. Passo piccolo: il numero di specie reagisce in ritardo
+        dist = _distance_matrix(genomes, config.genome_config)
+        t_lo = _threshold_for_species(dist, SPECIES_TARGET_MAX)
+        t_hi = max(t_lo, _threshold_for_species(dist, SPECIES_TARGET_MIN))
+        t_mid = min(max(_threshold_for_species(
+            dist, (SPECIES_TARGET_MIN + SPECIES_TARGET_MAX) // 2), t_lo), t_hi)
+        # Scende al massimo di THRESHOLD_MAX_DROP per generazione: le distanze
+        # dei figli mutati sono piu' grandi di quelle dei genitori su cui si
+        # calibra, e una specie in piu' vive almeno max_stagnation generazioni
+        # (all'avvio da zero, con distanze tutte simili, un salto da 3.0 a
+        # 0.56 aveva creato 36 specie su 60 genomi)
+        floor = threshold * (1 - THRESHOLD_MAX_DROP)
         if num_species < SPECIES_TARGET_MIN:
-            new_t = max(THRESHOLD_MIN, threshold * (1 - THRESHOLD_STEP))
+            new_t = max(min(threshold, t_mid), floor)
         elif num_species > SPECIES_TARGET_MAX:
-            new_t = min(THRESHOLD_MAX, threshold * (1 + THRESHOLD_STEP))
+            new_t = max(threshold, t_mid)
         else:
-            return
+            new_t = max(min(max(threshold, t_lo), t_hi), floor)
         if new_t != threshold:
             config.species_set_config.compatibility_threshold = new_t
             print(f"  [Speciazione] {num_species} specie (obiettivo {SPECIES_TARGET_MIN}-"
-                  f"{SPECIES_TARGET_MAX}), threshold {threshold:.2f} -> {new_t:.2f}")
+                  f"{SPECIES_TARGET_MAX}), threshold {threshold:.2f} -> {new_t:.2f} "
+                  f"(fascia {t_lo:.2f}-{t_hi:.2f})")
 
     def _draw_training_overlay(self, env, genome_num, total, frame, episode=1, episodes=1):
         """Disegna l'overlay con info training sopra il gioco."""
@@ -1273,6 +1436,7 @@ class NeatTrainer:
             'confirmation_seeds': len(CONFIRMATION_SEEDS),
             'validation_top_k': VALIDATION_TOP_K,
             'species_target': [SPECIES_TARGET_MIN, SPECIES_TARGET_MAX],
+            'num_inputs': config.genome_config.num_inputs,
             'max_episode_s': MAX_EPISODE_SECONDS,
             'min_episode_s': MIN_EPISODE_SECONDS,
             'early_stop_idle_pct': EARLY_STOP_IDLE_RATIO * 100,
@@ -1380,7 +1544,9 @@ class NeatTrainer:
         comp_keys = [k for k, *_ in FITNESS_COMPONENTS]
 
         def net_size(genome):
-            return len(genome.nodes), sum(1 for c in genome.connections.values() if c.enabled)
+            enabled = [k for k, c in genome.connections.items() if c.enabled]
+            # Input distinti letti dalla rete (chiavi negative)
+            return len(genome.nodes), len(enabled), len({i for i, _ in enabled if i < 0})
 
         sizes = [net_size(r['genome']) for r in rows]
         species = self._species_rows()
@@ -1413,21 +1579,23 @@ class NeatTrainer:
                 'sizes': {str(r['id']): r['size'] for r in species},
             },
             'net': {
-                'nodes_mean': sum(n for n, _ in sizes) / len(sizes),
-                'conns_mean': sum(c for _, c in sizes) / len(sizes),
-                'nodes_max': max(n for n, _ in sizes),
-                'conns_max': max(c for _, c in sizes),
+                'nodes_mean': sum(n for n, _, _ in sizes) / len(sizes),
+                'conns_mean': sum(c for _, c, _ in sizes) / len(sizes),
+                'nodes_max': max(n for n, _, _ in sizes),
+                'conns_max': max(c for _, c, _ in sizes),
+                'inputs_mean': sum(i for _, _, i in sizes) / len(sizes),
+                'inputs_max': max(i for _, _, i in sizes),
             },
         }
 
         top_genomes = []
         for rank, r in enumerate(ranked[:10], 1):
-            nodes, conns = net_size(r['genome'])
+            nodes, conns, inputs = net_size(r['genome'])
             top_genomes.append(dict(
                 _game_stats(r['stats']), rank=rank, key=r['genome'].key,
                 species=genome_to_species.get(r['genome'].key),
                 fitness=r['fitness'], imitation=r['stats']['comp_imitation'],
-                nodes=nodes, conns=conns,
+                nodes=nodes, conns=conns, inputs=inputs,
             ))
         snapshot = {
             'gen': self.generation,
@@ -1749,6 +1917,9 @@ class NeatTrainer:
                     session = pickle.load(f)
                 score = float(session['score'])
                 frames = session['frames']
+                obs_version = session.get('obs_version', 1)
+                if obs_version != OBS_VERSION:
+                    raise ValueError(f"osservazione v{obs_version}, attuale v{OBS_VERSION}")
                 n = min(IMITATION_SAMPLES_PER_SESSION, len(frames))
                 picked = []
                 for i in range(n):
@@ -1785,13 +1956,21 @@ class NeatTrainer:
         o corrotti), passando al precedente. Ritorna (path, config salvata
         nel checkpoint) oppure (None, None).
         """
+        num_inputs = self.config.genome_config.num_inputs
         for _generation, path in reversed(_list_checkpoints()):
             try:
                 with gzip.open(path) as f:
                     data = pickle.load(f)
-                return path, data[1]
             except Exception as e:
                 print(f"Checkpoint illeggibile, ignorato: {path} ({e!r})")
+                continue
+            # Popolazione allenata su un altro layout dell'osservazione
+            obs_version = getattr(data[1], 'obs_version', 1)
+            if obs_version != OBS_VERSION or data[1].genome_config.num_inputs != num_inputs:
+                print(f"Checkpoint per l'osservazione v{obs_version}, attuale v{OBS_VERSION}: "
+                      f"ignorato ({path})")
+                continue
+            return path, data[1]
         return None, None
 
 class _TrainingInterrupted(Exception):

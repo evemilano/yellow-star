@@ -115,7 +115,7 @@ Background NEAT training with no game rendering. Uses **multiprocessing** to eva
 Same NEAT training, but genomes are evaluated serially in the main process with live rendering of each genome playing (biome background, minimal HUD, training overlay). Only 1 frame out of 4 is drawn (`TRAIN_RENDER_SKIP = 4`) and there is no frame-rate cap. Each genome plays the same episodes as in headless mode (same seeds, same fitness). The population size comes from the NEAT config (150 in `ai/neat_config.txt`, also when resuming a headless checkpoint: its first generation still evaluates the restored population). The end-of-generation validation runs in the main process without rendering, with a progress screen.
 
 ### 4. Coop AI
-Human and a trained AI agent play **simultaneously** on the same screen. Requires a saved `ai/best_genome.pkl` from prior training (otherwise the menu entry is greyed out and `ENTER` on it does nothing). If the file exists but cannot be used (corrupted pickle, or a genome incompatible with `ai/neat_config.txt` and the 52-value observation), the error is printed to the console and the game starts without the AI ship, showing "Genoma AI non valido: si gioca senza AI" for 5 seconds. Both ships share the game world and the score; each ship has its own lives, upgrades, missiles and bombs, and power-ups go to whichever ship picks them up. The AI ship is tinted blue with an "AI" label. When the AI loses its 3 lives it is removed ("AI eliminata!"); the game ends only when the human loses.
+Human and a trained AI agent play **simultaneously** on the same screen. Requires a saved `ai/best_genome.pkl` from prior training (otherwise the menu entry is greyed out and `ENTER` on it does nothing). If the file exists but cannot be used (corrupted pickle, or a genome for another observation version or incompatible with `ai/neat_config.txt`), the error is printed to the console and the game starts without the AI ship, showing "Genoma AI non valido: si gioca senza AI" for 5 seconds. Both ships share the game world and the score; each ship has its own lives, upgrades, missiles and bombs, and power-ups go to whichever ship picks them up. The AI ship is tinted blue with an "AI" label. When the AI loses its 3 lives it is removed ("AI eliminata!"); the game ends only when the human loses.
 
 The AI ship plays by the same rules it was trained on in `GameEnv`:
 - each step the network sees the state at the end of the previous step, then the ship moves, shoots and uses missile/bomb before enemies, asteroids and bullets move;
@@ -257,7 +257,7 @@ Difficulty affects:
 │  │  ┌───────────┐  ┌────────────┐  │                     │
 │  │  │ Game Loop │  │ Observation│  │                     │
 │  │  │ (virtual  │  │ Builder    │  │                     │
-│  │  │  time)    │  │ (52-dim)   │  │                     │
+│  │  │  time)    │  │ (28-dim)   │  │                     │
 │  │  └───────────┘  └────────────┘  │                     │
 │  └─────────────────────────────────┘                     │
 │                                                          │
@@ -277,15 +277,17 @@ Both loops advance the simulation in fixed steps of `1000 / FPS` ms with `dt = 1
 
 ### Neural Network I/O
 
-**52 Inputs** (built by `build_observation()` in `src/game_env.py`, shared by `GameEnv`, `HumanRecorder` and the Coop AI ship; positions are divided by the screen size, most other values are scaled to roughly 0-1, missing entities are zero-padded):
+**28 Inputs** (observation layout version 2, `OBS_VERSION` / `OBS_SIZE` in `src/game_env.py`; built by `build_observation()`, shared by `GameEnv`, `HumanRecorder` and the Coop AI ship; positions are divided by the screen size, other values are scaled to 0-1, missing entities are zero-padded):
 
 | Group | Inputs | Description |
 |-------|--------|-------------|
-| Player state | 14 | Position (x, y), lives, shield HP, invincibility flag, missiles (capped at 3), bombs (capped at 3), level, shoot cooldown, enemy density, bullet density, weapon/engine/shield upgrade levels |
-| 3 nearest enemies | 12 | Relative dx, dy, speed, is_shooter (4 per enemy) |
-| 3 nearest asteroids | 12 | Relative dx, dy, speed, radius (4 per asteroid) |
-| 3 nearest enemy bullets | 12 | Relative dx, dy, velocity_x, velocity_y (4 per bullet) |
-| Nearest power-up | 2 | Relative dx, dy (upgrade power-up or missile pickup) |
+| Player state | 12 | Position (x, y), lives, shield HP / max, invincibility flag, missiles (capped at 3), bombs (capped at 3), level (capped at 20), shoot cooldown, weapon/engine/shield upgrade levels |
+| Lane danger | 7 | Horizontal bands `LANE_HEIGHT` (40 px) high, centred on the ship (lane 0) and 3 above / 3 below: proximity 0-1 (`1 - gap / (SCREEN_WIDTH / 2)`, 1 when already overlapping) of the closest enemy, asteroid or enemy bullet in the band that has not yet passed the ship; bands outside the screen read 1 (blocked). Enemies and asteroids move only horizontally, so a threat stays in its lane |
+| 2 nearest enemies | 4 | Relative dx, dy (aiming) |
+| Nearest upgrade power-up | 3 | Present flag, relative dx, dy (weapon/engine/shield drops only) |
+| Nearest missile pickup | 2 | Relative dx, dy |
+
+Version 1 (52 inputs: 3 nearest enemies, asteroids and bullets by distance with dx, dy, speed and size, one power-up of any kind) left "is something coming at me in my lane?" to the network: after ~800 generations the population still sat at the left edge, read a median of 6-14 inputs and collected ~1 power-up per game. A hand-written threshold policy that reads only the version 2 vector scores 8427 points and survives 171 s on average (24 fresh seeds, 12 power-ups per game), against 3482 points and 60 s for the best version 1 genome. Genomes, checkpoints and human sessions carry the observation version (`genome.obs_version`, the checkpoint config's `obs_version`, the session's `obs_version`): those of another version are ignored by the trainer and refused by Coop mode. The version 1 state was moved to `ai/archive_obs1/`.
 
 **5 Outputs** (decoded identically by `neat_trainer._decode_actions_static` and `Game._decode_ai_actions`):
 
@@ -301,7 +303,7 @@ In `GameEnv._apply_actions` and for the Coop AI ship, a missile is fired wheneve
 
 ### Fitness Function
 
-Fitness is computed by `_compute_fitness(env)` in `src/neat_trainer.py` from the statistics counters of `GameEnv` at the end of each episode; a genome's fitness is the **mean over its episodes** (2 per generation, see Training Pipeline). Multi-component fitness with 16 terms (the game score itself is not a term). Time-based terms are in seconds of game time (`frames / FPS`), so the weights do not depend on `settings.FPS`:
+Fitness is computed by `_compute_fitness(env)` in `src/neat_trainer.py` from the statistics counters of `GameEnv` at the end of each episode; a genome's fitness is the **mean over its episodes** (4 per generation, see Training Pipeline). Multi-component fitness with 16 terms (the game score itself is not a term). Time-based terms are in seconds of game time (`frames / FPS`), so the weights do not depend on `settings.FPS`:
 
 ```
 fitness = enemies_killed × 50          # bullet kills
@@ -312,18 +314,18 @@ fitness = enemies_killed × 50          # bullet kills
         + seconds × 1.5                # survival time
         - lives_lost × 200             # death penalty
         + level² × 50                  # progression bonus
-        + powerups_collected × 50
+        + powerups_collected × 250     # POWERUP_WEIGHT (50 up to version 4)
         + missiles_collected × 30
         + total_upgrade_levels × 20
         - shield_hits × 15
         - shield_breaks × 120
         - idle_seconds × 15            # time in which the ship did not move
         + near_misses × 3              # sprites that came within 60 px
-        + max(0, approach_seconds) × 3 # net time spent moving towards the nearest power-up
+        + max(0, approach_seconds) × 10 # PU_APPROACH_WEIGHT (3 up to version 4): net time spent moving towards the nearest power-up
         - shots_fired × 0.01
 ```
 
-`FITNESS_VERSION` (currently 4) identifies this formula together with the `GameEnv` rules and the validation suites; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
+`FITNESS_VERSION` (currently 5) identifies this formula together with the `GameEnv` rules and the validation suites; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
 
 How the counters are measured in `GameEnv`:
 - **Kills**: `enemies_killed` counts bullet kills, `missile_kills` the kills of every missile (counted on the snapshot taken before `missiles.update()`, so the kills of the frame in which a missile is spent or leaves the screen are included), `bomb_kills` the enemies cleared by a bomb.
@@ -353,7 +355,7 @@ Human gameplay is recorded during **Play** mode only via the `HumanRecorder` cla
 
 **Recording format** (per frame):
 ```python
-(observation_52dim, action_dict)  # action = {vertical, horizontal, shoot, missile, bomb}
+(observation_28dim, action_dict)  # action = {vertical, horizontal, shoot, missile, bomb}
 ```
 
 Each pair is the same one the network sees in `GameEnv`: the observation is the state at the end of the previous step (`Game._pending_obs`, captured at the end of `_update`, at game start and at restart), the action is what the human does in this step. With opposite keys held, the recorded direction is the one the ship actually moves in (down and right win, as in `Player.update`).
@@ -431,12 +433,12 @@ From `ai/neat_config.txt`:
 |-----------|-------|-------|
 | Population size | 150 | Forced to 200 in headless training (`HEADLESS_POP_SIZE`) |
 | Fitness criterion | max | `fitness_threshold = 99999`, `no_fitness_termination = True`, `reset_on_extinction = True` |
-| Initial topology | 52→5 fully connected (`full_direct`) | No hidden nodes, feed-forward |
+| Initial topology | 28→5 fully connected (`full_direct`) | No hidden nodes, feed-forward |
 | Activation | tanh | Only option (`activation_options = tanh`): sigmoid/relu nodes of older genomes mutate back to tanh |
 | Aggregation | sum | Not mutated |
 | Weight mutation rate | 40% | Power 0.5, replace rate 10%, range ±5 |
 | Bias mutation rate | 70% | Power 0.5, replace rate 10%, range ±5 |
-| Connection add prob | 40% | Structural growth |
+| Connection add prob | 70% | Structural growth (was 40%: after pruning most new links go to the inputs, and a single input link to the vertical output was worth up to +600 fitness) |
 | Node add prob | 35% | Hidden neuron insertion |
 | Connection delete prob | 20% | Pruning |
 | Node delete prob | 10% | Simplification |
@@ -450,9 +452,10 @@ From `ai/neat_config.txt`:
 
 ### Anti-Stagnation Mechanisms
 
-1. **Speciation control** (`_check_and_fix_stagnation()`, after every generation): the compatibility threshold keeps the number of species between `SPECIES_TARGET_MIN` (5) and `SPECIES_TARGET_MAX` (10): below it is multiplied by 0.95 (min 1.0), above by 1.05 (max 6.0). The change applies to the next speciation, also after a resume. With the former limits (only ≤ 2 or > 20 species) the population settled on ~20 species of ~10 genomes and no species lived more than ~40 generations
-2. **Species stagnation** (neat-python `DefaultStagnation`): species whose mean fitness does not improve on their best for 25 generations are removed (the 3 best species by current mean fitness are always protected)
-3. **Noise reduction**: common seeds for the whole generation and a 4-episode mean make species fitness and elites less dependent on a lucky episode (with 2 episodes, only 6 of the top 20 genomes on one pair of seeds were in the top 20 on another pair)
+1. **Speciation control** (`_check_and_fix_stagnation()`, after every generation): the compatibility threshold keeps the number of species between `SPECIES_TARGET_MIN` (5) and `SPECIES_TARGET_MAX` (10). It is calibrated on the pairwise distance matrix of the generation just evaluated: a greedy speciation from scratch (same rule as `DefaultSpeciesSet`) gives, by bisection, the thresholds that would form 10, 7 and 5 species. With fewer than 5 species the threshold drops to the 7-species value, with more than 10 it rises to it (existing species stay and disappear only through stagnation), otherwise it is clamped between the 10- and 5-species values (bounds 0.3-8.0). It never drops by more than `THRESHOLD_MAX_DROP` (15%) per generation, while it may rise freely: mutated children are farther apart than the parents the calibration is computed on, and an extra species lives at least `max_stagnation` generations (on a fresh start, with near-identical distances, a single drop from 3.0 to 0.56 created 36 species out of 60 genomes). The change applies to the next speciation, also after a resume. A fixed 5% step per generation reacted to the species count, which changes late, and made it oscillate between 3 and 12
+2. **Pruning of unexpressed genes** (`_prune_unexpressed()`, after the evaluation): disabled connections, hidden nodes with no path to an output and their links are deleted. The compiled network is bit-identical; without pruning genomes carried ~90 nodes and ~440 connections with only ~13 expressed, `mutate_add_connection` (which picks the target among all nodes) almost always hit dead genes, and the population read a median of 6 of the 52 inputs. The history field `net.inputs_mean` (dashboard chart "Input usati") tracks it
+3. **Species stagnation** (neat-python `DefaultStagnation`): species whose mean fitness does not improve on their best for 25 generations are removed (the 3 best species by current mean fitness are always protected)
+4. **Noise reduction**: common seeds for the whole generation and a 4-episode mean make species fitness and elites less dependent on a lucky episode (with 2 episodes, only 6 of the top 20 genomes on one pair of seeds were in the top 20 on another pair). On top of that (`_average_fitness()`), a genome's fitness is the mean over every generation it has played: elites are carried over unchanged and replay the new seeds, so their fitness converges while new genomes keep their 4-episode mean. Even on common seeds the fitness difference between two networks varies by ~1100 per episode (the game diverges as soon as the actions differ), so a useful mutation worth ~+600 was about one standard error
 
 The former injection of fresh/mutated genomes on fitness plateaus was removed: it ran inside the evaluation callback, left genomes without fitness (neat-python's `Population.run()` raises `RuntimeError`) and the injected genomes never reached reproduction.
 

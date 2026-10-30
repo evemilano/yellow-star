@@ -9,7 +9,7 @@ import os
 import pickle
 import time
 import pygame
-from src.game_env import build_observation
+from src.game_env import build_observation, OBS_VERSION
 
 
 AI_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai")
@@ -18,8 +18,10 @@ SESSIONS_DIR = os.path.join(AI_DIR, "human_sessions")
 # Versione del formato delle sessioni ('version' in session_data). Le sessioni
 # senza campo sono della versione 1: osservazione presa dopo sparo, missile e
 # bomba del frame e, con tasti opposti premuti, azione registrata opposta al
-# movimento reale. Dalla 2 la coppia (obs, azione) e' quella di GameEnv.
-SESSION_VERSION = 2
+# movimento reale. Dalla 2 la coppia (obs, azione) e' quella di GameEnv; dalla
+# 3 la sessione registra anche 'obs_version' (layout di build_observation:
+# senza campo e' la versione 1 a 52 valori, non usabile dal trainer attuale).
+SESSION_VERSION = 3
 
 
 class HumanRecorder:
@@ -44,12 +46,12 @@ class HumanRecorder:
 
     @staticmethod
     def observe(game):
-        """Osservazione dello stato corrente (vettore a 52 valori)."""
+        """Osservazione dello stato corrente (vettore di build_observation)."""
         return HumanRecorder._get_observation(game)
 
     @staticmethod
     def _get_observation(game):
-        """Estrae lo stesso vettore di osservazione a 52 valori usato da GameEnv."""
+        """Estrae lo stesso vettore di osservazione usato da GameEnv."""
         return build_observation(
             game.player, game.enemies, game.asteroids,
             game.enemy_bullets, game.powerups,
@@ -99,6 +101,7 @@ class HumanRecorder:
             'num_frames': len(self.frames),
             'timestamp': time.time(),
             'version': SESSION_VERSION,
+            'obs_version': OBS_VERSION,
         }
 
         filename = f"session_{int(time.time())}.pkl"

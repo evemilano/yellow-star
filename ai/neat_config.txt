@@ -6,7 +6,7 @@ reset_on_extinction   = True
 no_fitness_termination = True
 
 [DefaultGenome]
-num_inputs              = 52
+num_inputs              = 28
 num_outputs             = 5
 num_hidden              = 0
 feed_forward            = True
@@ -47,7 +47,7 @@ weight_mutate_power     = 0.5
 weight_mutate_rate      = 0.4
 weight_replace_rate     = 0.1
 
-conn_add_prob           = 0.4
+conn_add_prob           = 0.7
 conn_delete_prob        = 0.2
 node_add_prob           = 0.35
 node_delete_prob        = 0.1
