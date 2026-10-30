@@ -293,10 +293,10 @@ Both loops advance the simulation in fixed steps of `1000 / FPS` ms with `dt = 1
 | `out[0]` | < -0.2 / > 0.2 | Move up / Move down |
 | `out[1]` | < -0.2 / > 0.2 | Move left / Move right |
 | `out[2]` | > 0.3 | Shoot |
-| `out[3]` | > 0.5 | Fire missile (rising edge) |
+| `out[3]` | > 0.5 | Fire missile (held, at most one every 0.5 s) |
 | `out[4]` | > 0.5 | Detonate bomb (rising edge) |
 
-Missile and bomb fire only on the step in which the decoded action goes from False to True (in `GameEnv._apply_actions` and for the Coop AI ship), like a human key press: holding the output high does not empty the stock on consecutive steps. `tanh` is the only `activation_options` value, so activation mutations can no longer turn an output into `sigmoid` ([0, 1]) or `relu` ([0, ∞)), which cannot go below -0.2 (no up/left); nodes of older genomes that already use them still load and run, and are replaced by `tanh` when their activation mutates.
+In `GameEnv._apply_actions` and for the Coop AI ship, a missile is fired whenever the decoded action is True and at least `AI_MISSILE_INTERVAL` (500 ms) have passed since the previous AI missile, so a network that keeps the output high uses its missiles as it collects them. The bomb fires only on the step in which the decoded action goes from False to True, like a human key press: holding the output high does not empty the stock on consecutive steps. `tanh` is the only `activation_options` value, so activation mutations can no longer turn an output into `sigmoid` ([0, 1]) or `relu` ([0, ∞)), which cannot go below -0.2 (no up/left); nodes of older genomes that already use them still load and run, and are replaced by `tanh` when their activation mutates.
 
 ### Fitness Function
 
@@ -322,7 +322,7 @@ fitness = enemies_killed × 50          # bullet kills
         - shots_fired × 0.01
 ```
 
-`FITNESS_VERSION` (currently 2) identifies this formula together with the `GameEnv` rules and the validation suite; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
+`FITNESS_VERSION` (currently 3) identifies this formula together with the `GameEnv` rules and the validation suite; it must be incremented whenever any of them changes (see Checkpointing & Persistence).
 
 How the counters are measured in `GameEnv`:
 - **Kills**: `enemies_killed` counts bullet kills, `missile_kills` the kills of every missile (counted on the snapshot taken before `missiles.update()`, so the kills of the frame in which a missile is spent or leaves the screen are included), `bomb_kills` the enemies cleared by a bomb.

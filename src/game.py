@@ -8,6 +8,7 @@ from settings import (
     POWERUP_DROP_CHANCE,
     BOMB_FREEZE_DURATION, BOMB_FIELD_DURATION,
     ENEMY_BULLET_SPEED,
+    AI_MISSILE_INTERVAL,
 )
 from src.parallax import ParallaxBackground
 from src.player import Player
@@ -114,8 +115,9 @@ class Game:
         self.ai_missiles = pygame.sprite.Group()
         self.ai_dead_msg_timer = 0.0
         self.ai_error_msg_timer = 0.0
-        # Missile e bomba dell'AI sul fronte di salita, come in GameEnv
-        self._ai_prev_missile = False
+        # Missile dell'AI a output tenuto (uno ogni AI_MISSILE_INTERVAL ms) e
+        # bomba sul fronte di salita, come in GameEnv
+        self._ai_next_missile_at = 0
         self._ai_prev_bomb = False
         if coop_ai:
             self.ai_player = Player()
@@ -912,11 +914,13 @@ class Game:
         if actions['shoot']:
             self.ai_player.shoot(self.ai_bullets)
 
-        # Missile e bomba sul fronte di salita dell'output, come in GameEnv
-        missile = actions['missile']
-        if missile and not self._ai_prev_missile:
-            self.ai_player.shoot_missile(self.ai_missiles, self.enemies)
-        self._ai_prev_missile = missile
+        # Missile a output tenuto, al massimo uno ogni AI_MISSILE_INTERVAL ms,
+        # e bomba sul fronte di salita dell'output, come in GameEnv
+        if actions['missile']:
+            now = pygame.time.get_ticks()
+            if (now >= self._ai_next_missile_at
+                    and self.ai_player.shoot_missile(self.ai_missiles, self.enemies)):
+                self._ai_next_missile_at = now + AI_MISSILE_INTERVAL
 
         # Bomba (controllata dall'AI): stesse regole della bomba umana
         bomb = actions.get('bomb', False)
@@ -1048,7 +1052,7 @@ class Game:
         self.cursor_blink = 0
         self._frame_missile_pressed = False
         self._frame_bomb_pressed = False
-        self._ai_prev_missile = False
+        self._ai_next_missile_at = 0
         self._ai_prev_bomb = False
         now = pygame.time.get_ticks()
         self.last_enemy_spawn = now

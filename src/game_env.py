@@ -14,6 +14,7 @@ from settings import (
     PLAYER_LIVES,
     POWERUP_DROP_CHANCE,
     BOMB_FREEZE_DURATION, BOMB_FIELD_DURATION,
+    AI_MISSILE_INTERVAL,
     LEVEL_MAX,
     ENEMY_BULLET_SPEED,
 )
@@ -217,10 +218,13 @@ class GameEnv:
         # Saldo netto dei frame in cui la nave si avvicina (+1) o si allontana
         # (-1) dal power-up piu' vicino: oscillare non accumula nulla
         self.powerup_approach_frames = 0
+        self.missiles_fired = 0   # missili lanciati
+        self.bombs_used = 0       # bombe fatte esplodere
 
-        # Missile e bomba scattano sul fronte di salita dell'azione (come il
-        # KEYDOWN umano): valori del frame precedente
-        self._prev_missile = False
+        # Missile: con l'output alto parte appena consentito, al massimo uno
+        # ogni AI_MISSILE_INTERVAL ms (tempo virtuale). Bomba sul fronte di
+        # salita dell'azione (come il KEYDOWN umano): valore del frame precedente
+        self._next_missile_at = 0
         self._prev_bomb = False
         self._approach_delta = 0
 
@@ -288,7 +292,9 @@ class GameEnv:
         self.shots_hit = 0
         self.near_misses = 0
         self.powerup_approach_frames = 0
-        self._prev_missile = False
+        self.missiles_fired = 0
+        self.bombs_used = 0
+        self._next_missile_at = 0
         self._prev_bomb = False
         self._approach_delta = 0
         self.done = False
@@ -454,13 +460,17 @@ class GameEnv:
         else:
             self._shot_this_frame = False
 
-        # Missile e bomba sul fronte di salita (come il KEYDOWN umano): tenere
-        # alto l'output non svuota le scorte in frame consecutivi
-        missile = bool(actions.get('missile', False))
-        if missile and not self._prev_missile:
-            self.player.shoot_missile(self.missiles, self.enemies)
-        self._prev_missile = missile
+        # Missile a output tenuto: una rete con l'output sempre alto lancia i
+        # missili man mano che li raccoglie, uno ogni AI_MISSILE_INTERVAL ms
+        if actions.get('missile', False):
+            now = self._virtual_ticks()
+            if (now >= self._next_missile_at
+                    and self.player.shoot_missile(self.missiles, self.enemies)):
+                self._next_missile_at = now + AI_MISSILE_INTERVAL
+                self.missiles_fired += 1
 
+        # Bomba sul fronte di salita (come il KEYDOWN umano): tenere alto
+        # l'output non svuota le scorte in frame consecutivi
         bomb = bool(actions.get('bomb', False))
         if bomb and not self._prev_bomb and self.player.bombs > 0:
             self._use_bomb()
@@ -632,6 +642,7 @@ class GameEnv:
     def _use_bomb(self):
         if not self.player.use_bomb():
             return
+        self.bombs_used += 1
         up = self.player.upgrades
         score_mult = 2 if up.bomb_double_score else 1
 

@@ -70,7 +70,7 @@ IMITATION_WEIGHT_CAP = 4.0           # peso = min(tetto, ln(1 + score / 1000))
 # salvato con un'altra versione non e' confrontabile e viene ricalcolato;
 # riprendendo un checkpoint di un'altra versione si azzera lo storico di
 # fitness delle specie (vedi NeatTrainer._reset_species_history)
-FITNESS_VERSION = 2
+FITNESS_VERSION = 3
 
 # Validazione del best: a fine generazione i VALIDATION_TOP_K genomi con la
 # fitness di gioco piu' alta giocano un episodio intero (MAX_FRAMES_PER_EPISODE,

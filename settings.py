@@ -55,6 +55,7 @@ MISSILE_SPEED = 14
 MISSILE_KILL_COUNT = 5          # numero di nemici distrutti per missile
 MISSILE_POWERUP_SPAWN_DELAY = 8000  # ms tra uno spawn e l'altro
 MISSILE_POWERUP_SPEED = 2      # velocità scorrimento del power-up
+AI_MISSILE_INTERVAL = 500      # ms minimi tra due missili dell'AI (output tenuto alto)
 
 # ── Livelli ──
 LEVEL_SCORE_BASE = 500         # punti per passare dal livello 1 al 2
