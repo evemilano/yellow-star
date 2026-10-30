@@ -23,6 +23,7 @@ A side-scrolling space shooter built with **Pygame-CE** featuring a full **NEAT 
   - [Fitness Function](#fitness-function)
   - [Imitation Learning](#imitation-learning)
   - [Training Pipeline](#training-pipeline)
+  - [Training Dashboard](#training-dashboard)
   - [Anti-Stagnation Mechanisms](#anti-stagnation-mechanisms)
   - [Checkpointing & Persistence](#checkpointing--persistence)
 - [Project Structure](#project-structure)
@@ -42,7 +43,7 @@ A side-scrolling space shooter built with **Pygame-CE** featuring a full **NEAT 
 - **NEAT Neuroevolution**: Evolving neural network topologies with speciation and crossover
 - **Imitation Learning**: Human gameplay sessions are recorded and used to guide evolution
 - **Multiprocess Training**: Parallel genome evaluation on `cpu_count - 1` worker processes (headless mode)
-- **Real-Time Dashboard**: Live fitness metrics, fitness component breakdown, species breakdown, and behavior statistics during training
+- **Training Dashboard**: An HTML page (opened in the browser when training starts) with the full training history: validation record, population trends, gameplay and behavior metrics, fitness breakdown, species, network complexity, explanations of every metric; plus a summary screen in the game window
 - **Procedural Audio**: All sound effects and background music generated at runtime via waveform synthesis (zero external audio files)
 - **Procedural Sprites**: Enemy ships (pre-generated to PNG by a script), explosions, asteroids, projectiles and power-ups are generated programmatically
 - **Biome Background**: Procedural parallax landscapes (6 surface biomes + a final space biome) with automatic crossfades
@@ -108,7 +109,7 @@ The main menu presents four options navigable with arrow keys (menu labels are i
 Standard keyboard-controlled gameplay. Every game is **recorded** for imitation learning and saved to `ai/human_sessions/` when it ends with a game over (leaving with `ESC` before game over discards the recording). Up to 20 sessions are retained (oldest deleted first).
 
 ### 2. Train AI (Headless)
-Background NEAT training with no game rendering. Uses **multiprocessing** to evaluate genomes (and to validate the best ones) in parallel on `cpu_count - 1` worker processes; the population size is forced to **200** (`HEADLESS_POP_SIZE`). A real-time dashboard is drawn in the game window (progress, fitness, fitness breakdown, species, AI behavior, efficiency); neat-python's `StdOutReporter` also prints per-generation statistics to the console. `ESC` or closing the window interrupts training and returns to the menu.
+Background NEAT training with no game rendering. Uses **multiprocessing** to evaluate genomes (and to validate the best ones) in parallel on `cpu_count - 1` worker processes; the population size is forced to **200** (`HEADLESS_POP_SIZE`). The game window shows a summary screen (phase and progress, validation record, how the record plays, population fitness trend, species, fitness chart) and the detailed dashboard opens in the browser (see Training Dashboard); neat-python's `StdOutReporter` also prints per-generation statistics to the console. `D` reopens the dashboard; `ESC` or closing the window interrupts training and returns to the menu.
 
 ### 3. View AI Training (Visual)
 Same NEAT training, but genomes are evaluated serially in the main process with live rendering of each genome playing (biome background, minimal HUD, training overlay). Only 1 frame out of 4 is drawn (`TRAIN_RENDER_SKIP = 4`) and there is no frame-rate cap. Each genome plays the same episodes as in headless mode (same seeds, same fitness). The population size comes from the NEAT config (150 in `ai/neat_config.txt`, also when resuming a headless checkpoint: its first generation still evaluates the restored population). The end-of-generation validation runs in the main process without rendering, with a progress screen.
@@ -400,16 +401,24 @@ This acts as a **soft behavioral prior** — once the bonus is active, genomes t
       the best mean replaces ai/best_genome.pkl if it beats the validation record
       (headless: in the Pool; genomes already validated in the session, e.g. elites, are cached)
    d. Adjust the compatibility threshold if needed (Anti-Stagnation)
-   e. Update real-time dashboard
+   e. Append the generation to ai/training_history.jsonl and refresh the dashboard data
    f. NEAT reproduction + speciation (neat-python)
    g. Checkpoint every 10 generations (only the last 2 kept), and on interruption
 ```
 
-**Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy` and a 1×1 display for headless Pygame operation, receives the imitation samples and the human action frequencies through the pool initializer, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation and validation episodes are distributed via `pool.imap_unordered()`; the dashboard is refreshed (and `ESC` polled) every 5 completed genomes and after every validation episode.
+**Parallelization**: The `Pool` is created once per training run. Each worker process initializes with `SDL_VIDEODRIVER=dummy`, `SDL_AUDIODRIVER=dummy` and a 1×1 display for headless Pygame operation, receives the imitation samples and the human action frequencies through the pool initializer, and lowers its priority to `BELOW_NORMAL` on Windows. Genome evaluation and validation episodes are distributed via `pool.imap_unordered()`; the summary screen is redrawn (and `ESC`/`D` polled) every 5 completed genomes and after every validation episode.
 
 **Cost** (8-core machine, 7 workers, measured on the checkpoint-80 population): about 150 worker-µs per game frame; a generation of 200 genomes × 2 episodes takes ~13 s plus ~5 s of validation while genomes die early (~1500 frames per episode), and would take ~95 s plus up to ~12 s of validation if every episode reached the 180 s cap.
 
-**Dashboard**: the fitness breakdown shows every component (bullet, missile and bomb kills, shooting penalty and imitation bonus included), so its TOTAL equals the genome's fitness; "Record val." is the validation record; gen/min and evaluated genomes count only the current session.
+### Training Dashboard
+
+`dashboard/index.html` is a self-contained page (vanilla JavaScript and SVG charts, no external libraries, works offline from `file://`). Training opens it in the default browser (`DASHBOARD_AUTO_OPEN`) and `D` in the training window reopens it. It reads two scripts that `src/training_dashboard.py` writes next to it, atomically, loaded with `<script>` tags because browsers block `fetch` on `file://`:
+- `dashboard/data.js` (`window.YS_DATA`), rewritten at the end of every generation: the whole history, the detail of the last generation (top 10 genomes, species table, record with per-seed fitness and fitness breakdown) and the training parameters, including the fitness components with their weights and descriptions (`FITNESS_COMPONENTS` in `neat_trainer.py`, kept next to `_compute_fitness`);
+- `dashboard/live.js` (`window.YS_LIVE`), rewritten at most once per second: phase (`avvio`, `rivalutazione`, `valutazione`, `validazione`, `fermo`), progress, generation and the stamp of `data.js`.
+
+The page polls `live.js` every 3 s and reloads `data.js` only when its stamp changes. The history is kept in `ai/training_history.jsonl` (one JSON line per generation, appended, committed like the other training state), so the dashboard also shows previous sessions; if a generation appears twice (resume from an older checkpoint) the last line wins. Each line holds: generation, fitness version, session, duration, episode cap, population fitness summary (mean, median, 10th/90th percentile, min, max, sd), game statistics averaged over the population and over the top 10% by fitness (score, survival seconds, level, lives lost, kills per weapon, missiles collected/fired, bombs used, power-ups, idle %, accuracy), mean fitness components, the generation's best genome, the validated best of the generation (mean, sd and game statistics on the validation seeds), the record and the record's game statistics, species (count, threshold, max stagnation, size per species) and network size (mean/max nodes and enabled connections).
+
+Sections: status bar (live phase and progress), a plain-language verdict (record improvements, population trend, how the record plays, behavior warnings, species, speed), six indicator cards with sparklines, progress (record and validated bests, population fitness with rolling mean and 10–90% band, the record's per-seed validation fitness), gameplay (score, survival, level, kills per weapon), behavior (idle time, accuracy, lives lost, missiles, bombs, power-ups), fitness breakdown (record vs population mean, and the main components over time), species (stacked sizes and table with stagnation), networks and timing, the last generation's top 10, and a glossary with the training parameters. Trend badges compare the mean of the last 15 generations with the previous 15 and report "stable" when the difference is within the generation-to-generation noise (|z| < 2); the verdict and the trends use only the current `FITNESS_VERSION`, and charts mark version changes and resumed sessions with dashed lines. The range selector (last 50, last 200, all generations) and the theme (auto, light, dark) are stored in the browser's `localStorage`.
 
 ### NEAT Hyperparameters
 
@@ -450,7 +459,8 @@ The former injection of fresh/mutated genomes on fitness plateaus was removed: i
 |------|--------|---------|
 | `ai/neat-checkpoint-{N}` | gzip-compressed pickle | Full NEAT state: generation, config (with `fitness_version`), population, species, random state |
 | `ai/best_genome.pkl` | Pickle | The genome with the best validation mean (used for Coop mode) |
-| `ai/best_genome_meta.json` | JSON | Validation record of `best_genome.pkl`: `validation_mean`, per-seed fitness, `validation_seeds`, `max_frames`, `fitness_version`, `genome_key`, generation, timestamp |
+| `ai/best_genome_meta.json` | JSON | Validation record of `best_genome.pkl`: `validation_mean`, per-seed fitness, mean validation statistics (`validation_stats`), `validation_seeds`, `max_frames`, `fitness_version`, `genome_key`, generation, timestamp |
+| `ai/training_history.jsonl` | JSON Lines | One line per evaluated generation, read by the training dashboard (see Training Dashboard) |
 | `ai/human_sessions/session_*.pkl` | Pickle | Recorded human (observation, action) frame pairs + final score + format version |
 | `scores.json` | JSON | Top-10 human player leaderboard (`name`, `score`), UTF-8, written atomically (temporary file + `os.replace`). A missing, empty or invalid file reads as an empty leaderboard (malformed entries are skipped); an unparsable file is renamed to `scores.json.bak` before the next save; if the file cannot be written the score is not saved and the game goes on |
 
@@ -471,6 +481,8 @@ Yellow-Star/
 ├── scores.json              # Persistent leaderboard (top 10)
 ├── generate_enemies.py      # Utility: procedurally generates 16 enemy sprites (overwrites the PNGs)
 ├── CLAUDE.md                # Guidance for Claude Code (commands, architecture notes)
+├── dashboard/
+│   └── index.html           # Training dashboard (data.js and live.js are generated)
 │
 ├── src/
 │   ├── __init__.py
@@ -491,13 +503,15 @@ Yellow-Star/
 │   ├── sounds.py            # Procedural audio synthesis (SFX + BGM)
 │   ├── ship_sprites.py      # Player ship sprite loading (10 variants, one per weapon level)
 │   ├── game_env.py          # GameEnv wrapper for NEAT — headless stepping, observation builder
-│   ├── neat_trainer.py      # NeatTrainer — evolution loop, multiprocessing, dashboard
+│   ├── neat_trainer.py      # NeatTrainer — evolution loop, multiprocessing, summary screen
+│   ├── training_dashboard.py  # History and live state for the HTML dashboard
 │   └── human_recorder.py    # Records human gameplay sessions for imitation learning
 │
 ├── ai/
 │   ├── neat_config.txt      # NEAT hyperparameter configuration
 │   ├── best_genome.pkl      # Best validated genome (for Coop mode)
 │   ├── best_genome_meta.json  # Validation record of best_genome.pkl (created by training)
+│   ├── training_history.jsonl # Per-generation training history (created by training)
 │   ├── neat-checkpoint-*    # Population checkpoints (every 10 generations, last 2 kept)
 │   └── human_sessions/      # Recorded human play sessions (.pkl)
 │

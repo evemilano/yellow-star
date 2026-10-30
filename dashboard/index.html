@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Training AI · Yellow Star</title>
+<style>
+:root {
+  --bg: #f3f5f8; --card: #ffffff; --card-2: #f6f7fa; --border: #e2e5eb;
+  --text: #151a24; --muted: #5a6374; --faint: #8b93a3; --grid: #eceef2;
+  --c-record: #15964a; --c-val: #2563eb; --c-pop: #d97706; --c-top: #7c3aed;
+  --c-faint: #a3abb9; --c-good: #15964a; --c-bad: #d42f2f; --c-warn: #c26a00; --c-info: #2563eb;
+  --good-bg: #e7f6ed; --bad-bg: #fdecec; --warn-bg: #fff4e0; --info-bg: #e9f0fe; --flat-bg: #eef0f4;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c0f16; --card: #141924; --card-2: #1a2030; --border: #252c3c;
+    --text: #e8ebf2; --muted: #9ca4b6; --faint: #6c7589; --grid: #222938;
+    --c-record: #34d399; --c-val: #60a5fa; --c-pop: #fbbf24; --c-top: #a78bfa;
+    --c-faint: #5d6679; --c-good: #34d399; --c-bad: #f87171; --c-warn: #fbbf24; --c-info: #60a5fa;
+    --good-bg: #10291f; --bad-bg: #2e1517; --warn-bg: #2d2311; --info-bg: #13213b; --flat-bg: #1c2231;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0c0f16; --card: #141924; --card-2: #1a2030; --border: #252c3c;
+  --text: #e8ebf2; --muted: #9ca4b6; --faint: #6c7589; --grid: #222938;
+  --c-record: #34d399; --c-val: #60a5fa; --c-pop: #fbbf24; --c-top: #a78bfa;
+  --c-faint: #5d6679; --c-good: #34d399; --c-bad: #f87171; --c-warn: #fbbf24; --c-info: #60a5fa;
+  --good-bg: #10291f; --bad-bg: #2e1517; --warn-bg: #2d2311; --info-bg: #13213b; --flat-bg: #1c2231;
+  --shadow: none;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+b, strong { font-weight: 600; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* ── barra superiore ── */
+.topbar {
+  position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px); border-bottom: 1px solid var(--border);
+}
+.topbar-in {
+  max-width: 1440px; margin: 0 auto; padding: 12px 24px;
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 12px; min-width: 220px; }
+.logo {
+  width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center;
+  background: linear-gradient(135deg, #ffd23f, #f59e0b); color: #3b2300; font-size: 20px; font-weight: 700;
+}
+.brand h1 { font-size: 17px; margin: 0; line-height: 1.2; }
+.brand p { margin: 0; font-size: 12.5px; color: var(--muted); }
+.status { flex: 1 1 360px; min-width: 260px; }
+.status-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 999px;
+  font-weight: 600; font-size: 12.5px; background: var(--flat-bg); color: var(--muted);
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+.pill.live { background: var(--good-bg); color: var(--c-good); }
+.pill.live .dot { animation: pulse 1.6s infinite; }
+.pill.warn { background: var(--warn-bg); color: var(--c-warn); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+.progress { height: 6px; border-radius: 3px; background: var(--card-2); overflow: hidden; margin-top: 7px; }
+.progress span { display: block; height: 100%; background: var(--c-good); border-radius: 3px; transition: width .4s; }
+.progress.val span { background: var(--c-val); }
+.controls { display: flex; align-items: center; gap: 10px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--card); }
+.seg button {
+  border: 0; background: transparent; color: var(--muted); padding: 6px 11px; font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button.on { background: var(--card-2); color: var(--text); font-weight: 600; }
+.icon-btn {
+  border: 1px solid var(--border); background: var(--card); color: var(--muted); border-radius: 9px;
+  height: 31px; padding: 0 10px; font: inherit; font-size: 12.5px; cursor: pointer;
+}
+
+/* ── layout ── */
+main { max-width: 1440px; margin: 0 auto; padding: 20px 24px 60px; }
+.section-title { display: flex; align-items: baseline; gap: 12px; margin: 34px 0 12px; }
+.section-title h2 { font-size: 16px; margin: 0; }
+.section-title p { margin: 0; color: var(--muted); font-size: 13px; }
+.grid { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.grid.one { grid-template-columns: minmax(0, 1fr); }
+.span2 { grid-column: span 2; }
+@media (max-width: 1100px) { .grid.three { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 820px) {
+  .grid, .grid.three { grid-template-columns: minmax(0, 1fr); }
+  .span2 { grid-column: auto; }
+  .topbar-in, main { padding-left: 16px; padding-right: 16px; }
+  .topbar { position: static; }
+}
+.card {
+  background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: var(--shadow); padding: 16px 18px; min-width: 0;
+}
+.card-h { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; }
+.card-h h3 { font-size: 14.5px; margin: 0; }
+.card-how { color: var(--muted); font-size: 12.8px; margin: 4px 0 10px; max-width: 80ch; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+.legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 6px; }
+.legend i.dot { width: 8px; height: 8px; border-radius: 50%; }
+.legend i.dash { background: none !important; border-top: 2px dashed; height: 0; }
+.legend i.band { height: 10px; opacity: .35; border-radius: 3px; }
+
+/* ── giudizio ── */
+.verdict { padding: 18px 20px; }
+.verdict-h { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.verdict-h .big { font-size: 19px; font-weight: 650; }
+.verdict-h .tag { font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; white-space: nowrap; }
+.tag.good { background: var(--good-bg); color: var(--c-good); }
+.tag.bad { background: var(--bad-bg); color: var(--c-bad); }
+.tag.warn, .tag.neutral { background: var(--warn-bg); color: var(--c-warn); }
+.verdict ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.verdict li { display: flex; gap: 10px; align-items: flex-start; font-size: 13.8px; }
+.verdict li .ic {
+  flex: 0 0 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 700; margin-top: 1px;
+}
+.ic.good { background: var(--good-bg); color: var(--c-good); }
+.ic.bad { background: var(--bad-bg); color: var(--c-bad); }
+.ic.warn { background: var(--warn-bg); color: var(--c-warn); }
+.ic.info { background: var(--info-bg); color: var(--c-info); }
+
+/* ── indicatori ── */
+.kpis { display: grid; gap: 14px; grid-template-columns: repeat(6, minmax(0, 1fr)); margin-top: 16px; }
+@media (max-width: 1300px) { .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 440px) { .kpis { grid-template-columns: minmax(0, 1fr); } }
+.kpi { padding: 14px 16px 12px; display: flex; flex-direction: column; gap: 2px; }
+.kpi-l { font-size: 12px; font-weight: 600; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.kpi-v { font-size: 26px; font-weight: 650; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+.kpi-v small { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 3px; }
+.kpi-s { font-size: 12.3px; color: var(--muted); min-height: 18px; }
+.spark { width: 100%; height: 34px; margin-top: 6px; display: block; }
+
+/* ── badge di tendenza e info ── */
+.badge { display: inline-block; font-size: 11.8px; font-weight: 600; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.badge.good { background: var(--good-bg); color: var(--c-good); }
+.badge.bad { background: var(--bad-bg); color: var(--c-bad); }
+.badge.flat { background: var(--flat-bg); color: var(--muted); }
+.badge.na { background: var(--flat-bg); color: var(--faint); font-weight: 500; }
+.info {
+  position: relative; display: inline-grid; place-items: center; width: 16px; height: 16px; border-radius: 50%;
+  border: 1px solid var(--faint); color: var(--muted); font-size: 10.5px; font-weight: 700; cursor: help; flex: 0 0 auto;
+}
+.info:hover::after, .info:focus::after {
+  content: attr(data-tip); position: absolute; left: 50%; top: 22px; transform: translateX(-50%);
+  width: max-content; max-width: 300px; white-space: normal; z-index: 30;
+  background: var(--text); color: var(--bg); font-size: 12.3px; font-weight: 400; line-height: 1.45;
+  padding: 8px 10px; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25);
+}
+
+/* ── grafici ── */
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; overflow: visible; touch-action: pan-y; }
+.chart .grid-l { stroke: var(--grid); stroke-width: 1; }
+.chart .zero { stroke: var(--faint); stroke-width: 1; }
+.chart .tick { fill: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart .marker { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart .marker-label { fill: var(--muted); font-size: 10.5px; }
+.chart .guide { stroke: var(--faint); stroke-width: 1; }
+.nodata { color: var(--faint); font-size: 13px; padding: 30px 0; text-align: center; }
+.tip {
+  position: absolute; z-index: 10; pointer-events: none; min-width: 170px;
+  background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 8px 10px; font-size: 12.3px;
+}
+.tip-h { font-weight: 600; margin-bottom: 4px; }
+.tip-r { display: flex; align-items: center; gap: 7px; white-space: nowrap; }
+.tip-r i { width: 9px; height: 9px; border-radius: 2px; flex: 0 0 auto; }
+.tip-r span { color: var(--muted); flex: 1; }
+.tip-r b { font-variant-numeric: tabular-nums; }
+
+/* ── scomposizione fitness ── */
+.comp { display: grid; gap: 2px; }
+.comp-row {
+  display: grid; grid-template-columns: minmax(150px, 1.35fr) minmax(120px, 2fr) 76px 76px; gap: 12px;
+  align-items: center; padding: 6px 0; border-bottom: 1px solid var(--grid);
+}
+.comp-row.head { font-size: 12px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+.comp-row.total { border-bottom: 0; font-weight: 650; }
+.comp-name { font-size: 13.2px; line-height: 1.25; }
+.comp-name small { display: block; color: var(--faint); font-size: 11.5px; }
+.comp-row .num { text-align: right; font-size: 13px; }
+.bars { display: grid; gap: 3px; position: relative; }
+.bars::before { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--border); }
+.cb { position: relative; height: 9px; }
+.cb span { position: absolute; top: 0; bottom: 0; border-radius: 3px; }
+.cb .pos { left: 50%; width: var(--w); background: var(--c-good); }
+.cb .neg { right: 50%; width: var(--w); background: var(--c-bad); }
+.cb.pop { height: 6px; }
+.cb.pop span { opacity: .4; }
+@media (max-width: 640px) {
+  .comp-row { grid-template-columns: minmax(0, 1fr) 64px 64px; }
+  .comp-row .bars { display: none; }
+}
+
+/* ── tabelle ── */
+.table-wrap { overflow-x: auto; margin: 0 -4px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: right; font-weight: 600; color: var(--muted); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; white-space: nowrap; }
+th:first-child, td:first-child, th.l, td.l { text-align: left; }
+tr.hl td { background: var(--card-2); }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+.meter { display: inline-block; width: 70px; height: 6px; border-radius: 3px; background: var(--card-2); vertical-align: middle; margin-right: 8px; overflow: hidden; }
+.meter span { display: block; height: 100%; border-radius: 3px; }
+
+/* ── guida ── */
+.guide-grid { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+@media (max-width: 820px) { .guide-grid { grid-template-columns: minmax(0, 1fr); } }
+details.card { padding: 0; }
+details.card summary { cursor: pointer; padding: 13px 18px; font-weight: 600; list-style: none; display: flex; justify-content: space-between; }
+details.card summary::after { content: "+"; color: var(--faint); font-weight: 400; }
+details.card[open] summary::after { content: "–"; }
+details.card .body { padding: 0 18px 14px; color: var(--muted); font-size: 13.3px; }
+details.card .body p { margin: 0 0 8px; }
+.params { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; font-size: 13px; }
+.params dt { color: var(--muted); }
+.params dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.empty { text-align: center; padding: 60px 20px; }
+.empty h2 { margin: 0 0 8px; }
+footer { color: var(--faint); font-size: 12px; text-align: center; padding: 10px 24px 30px; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <div class="logo">★</div>
+      <div><h1>Training dell'AI</h1><p>Yellow Star · neuroevoluzione NEAT</p></div>
+    </div>
+    <div class="status" id="status"></div>
+    <div class="controls">
+      <div class="seg" id="range" role="group" aria-label="Generazioni mostrate">
+        <button data-r="50">Ultime 50</button><button data-r="200">Ultime 200</button><button data-r="all">Tutte</button>
+      </div>
+      <button class="icon-btn" id="theme" title="Cambia tema">Tema: auto</button>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section id="empty" class="card empty" hidden>
+    <h2>Nessun dato del training</h2>
+    <p class="muted">Avvia "Allena AI" dal menu del gioco: questa pagina si aggiorna da sola ogni pochi secondi.<br>
+    I dati arrivano da <code>dashboard/data.js</code> e <code>dashboard/live.js</code>, scritti dal trainer.</p>
+  </section>
+
+  <div id="content" hidden>
+    <section class="card verdict" id="verdict"></section>
+    <section class="kpis" id="kpis"></section>
+
+    <div class="section-title"><h2>Progresso</h2><p>La misura affidabile è la validazione: le stesse 10 partite per tutti i genomi.</p></div>
+    <div class="grid">
+      <article class="card span2" id="c-progress"></article>
+      <article class="card" id="c-fitness"></article>
+      <article class="card" id="c-seeds"></article>
+    </div>
+
+    <div class="section-title"><h2>Come gioca</h2><p>Risultati in partita: punti, durata, livello, armi usate.</p></div>
+    <div class="grid">
+      <article class="card" id="c-score"></article>
+      <article class="card" id="c-surv"></article>
+      <article class="card" id="c-level"></article>
+      <article class="card" id="c-kills"></article>
+    </div>
+
+    <div class="section-title"><h2>Comportamento</h2><p>Abitudini dei migliori 10% della generazione rispetto alla popolazione.</p></div>
+    <div class="grid three" id="behaviour"></div>
+
+    <div class="section-title"><h2>Da dove viene la fitness</h2><p>Quanto pesa ogni premio e ogni penalità.</p></div>
+    <div class="grid">
+      <article class="card" id="c-comp"></article>
+      <article class="card" id="c-comp-time"></article>
+    </div>
+
+    <div class="section-title"><h2>Specie e diversità</h2><p>NEAT divide la popolazione in specie per proteggere le idee nuove.</p></div>
+    <div class="grid">
+      <article class="card" id="c-species"></article>
+      <article class="card" id="c-species-table"></article>
+    </div>
+
+    <div class="section-title"><h2>Reti e tempi</h2><p>Complessità delle reti neurali, imitazione e velocità del training.</p></div>
+    <div class="grid" id="nets"></div>
+
+    <div class="section-title"><h2>Ultima generazione</h2><p id="top-sub">I 10 genomi con la fitness più alta.</p></div>
+    <div class="grid one"><article class="card" id="c-top"></article></div>
+
+    <div class="section-title"><h2>Guida alla lettura</h2><p>Termini e parametri del training.</p></div>
+    <div class="guide-grid" id="guide"></div>
+  </div>
+</main>
+<footer id="footer"></footer>
+
+<script>
+'use strict';
+
+/* ───────── stato e preferenze ───────── */
+const S = { data: null, live: null, stamp: null, range: '200', dataLoading: false };
+function pref(key, value) {
+  try {
+    if (value === undefined) return localStorage.getItem('ys-dash.' + key);
+    localStorage.setItem('ys-dash.' + key, value);
+  } catch (e) { return null; }
+  return null;
+}
+
+/* ───────── formattazione ───────── */
+const isNum = v => typeof v === 'number' && Number.isFinite(v);
+function nf(v, d = 0) {
+  if (!isNum(v)) return '–';
+  return v.toLocaleString('it-IT', { minimumFractionDigits: d, maximumFractionDigits: d });
+}
+function sgn(v, d = 0) {
+  if (!isNum(v)) return '–';
+  const r = Number(Math.abs(v).toFixed(d));
+  return (r === 0 ? '±' : v > 0 ? '+' : '−') + nf(Math.abs(v), d);
+}
+function decFor(step) { return step >= 1 ? 0 : step >= 0.1 ? 1 : 2; }
+function dur(sec) {
+  if (!isNum(sec)) return '–';
+  sec = Math.max(0, Math.round(sec));
+  if (sec < 60) return sec + ' s';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return m + ' min' + (s ? ' ' + s + ' s' : '');
+  const h = Math.floor(m / 60);
+  return h + ' h ' + (m % 60) + ' min';
+}
+function clock(ms) { return new Date(ms).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+const $ = (sel, el = document) => el.querySelector(sel);
+
+/* ───────── statistica ───────── */
+function mean(a) { return a.length ? a.reduce((x, y) => x + y, 0) / a.length : NaN; }
+function variance(a) {
+  if (a.length < 2) return 0;
+  const m = mean(a);
+  return a.reduce((s, x) => s + (x - m) ** 2, 0) / (a.length - 1);
+}
+function rolling(vals, k = 10) {
+  return vals.map((_, i) => {
+    const w = vals.slice(Math.max(0, i - k + 1), i + 1).filter(isNum);
+    return w.length ? mean(w) : null;
+  });
+}
+/* Ultime k generazioni contro le k precedenti; |z| >= 2 = oltre il rumore */
+function trend(vals, k = 15) {
+  const v = vals.filter(isNum);
+  if (v.length < 8) return null;
+  k = Math.min(k, Math.floor(v.length / 2));
+  const a = v.slice(-2 * k, -k), b = v.slice(-k);
+  const ma = mean(a), mb = mean(b);
+  const se = Math.sqrt(variance(a) / k + variance(b) / k);
+  const z = se > 0 ? (mb - ma) / se : 0;
+  const pct = ma !== 0 ? (mb - ma) / Math.abs(ma) * 100 : 0;
+  return { z, pct, from: ma, to: mb, k, dir: z >= 2 ? 1 : z <= -2 ? -1 : 0 };
+}
+function trendBadge(t, better = 'up', d = 1) {
+  if (!t) return '<span class="badge na" title="Servono almeno 8 generazioni con la stessa versione della fitness.">tendenza: pochi dati</span>';
+  const good = t.dir === 0 ? null : (t.dir > 0) === (better === 'up');
+  const cls = t.dir === 0 ? 'flat' : good ? 'good' : 'bad';
+  const arrow = t.dir > 0 ? '↑' : t.dir < 0 ? '↓' : '→';
+  const word = t.dir === 0 ? 'stabile' : good ? 'migliora' : 'peggiora';
+  const pct = t.dir === 0 ? '' : ' ' + sgn(t.pct, 0) + '%';
+  const tip = `Media delle ultime ${t.k} generazioni (${nf(t.to, d)}) rispetto alle ${t.k} precedenti (${nf(t.from, d)}). "Stabile" significa che la differenza rientra nel rumore tra una generazione e l'altra.`;
+  return `<span class="badge ${cls}" title="${esc(tip)}">${arrow} ${word}${pct}</span>`;
+}
+
+/* ───────── colori dal tema ───────── */
+function palette() {
+  const cs = getComputedStyle(document.documentElement);
+  const g = n => cs.getPropertyValue(n).trim();
+  return {
+    record: g('--c-record'), val: g('--c-val'), pop: g('--c-pop'), top: g('--c-top'),
+    faint: g('--c-faint'), good: g('--c-good'), bad: g('--c-bad'), warn: g('--c-warn'),
+    card: g('--card'), text: g('--text'), muted: g('--muted'),
+    dark: cs.colorScheme.includes('dark'),
+  };
+}
+function speciesColor(id, dark) {
+  const h = (Number(id) * 137.508) % 360;
+  return `hsl(${h.toFixed(0)} 60% ${dark ? 60 : 48}%)`;
+}
+
+/* ───────── grafici SVG ───────── */
+const NS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) if (attrs[k] !== undefined && attrs[k] !== null) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function niceStep(range, count) {
+  if (!(range > 0)) return 1;
+  const raw = range / Math.max(1, count);
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  const n = raw / mag;
+  const e = 1e-9;  // tolleranza: 200.0000001 / 4 deve dare passo 50, non 100
+  return (n <= 1 + e ? 1 : n <= 2 + e ? 2 : n <= 2.5 + e ? 2.5 : n <= 5 + e ? 5 : 10) * mag;
+}
+function noData(host, msg) { host.innerHTML = `<div class="nodata">${esc(msg || 'Ancora nessun dato per questo grafico.')}</div>`; }
+function pathD(points, sx, sy, step) {
+  let d = '', pen = false;
+  for (const p of points) {
+    if (!isNum(p.y)) { pen = false; continue; }
+    const X = sx(p.x).toFixed(1), Y = sy(p.y).toFixed(1);
+    if (!pen) { d += `M${X},${Y}`; pen = true; } else if (step) d += `H${X}V${Y}`; else d += `L${X},${Y}`;
+  }
+  return d;
+}
+function frame(host, height, ml) {
+  host.innerHTML = '';
+  host.classList.add('chart');
+  const W = Math.max(240, Math.floor(host.clientWidth || 600));
+  const H = height;
+  const m = { l: ml, r: 14, t: 12, b: 28 };
+  return { W, H, m, pw: W - m.l - m.r, ph: H - m.t - m.b };
+}
+function axes(svg, f, sx, sy, x0, x1, y0, y1, ystep, fmt, markers) {
+  for (let v = y0, i = 0; v <= y1 + ystep / 2 && i < 40; v += ystep, i++) {
+    const y = sy(v);
+    svgEl('line', { x1: f.m.l, x2: f.W - f.m.r, y1: y, y2: y, class: 'grid-l' }, svg);
+    svgEl('text', { x: f.m.l - 8, y: y + 4, class: 'tick', 'text-anchor': 'end' }, svg).textContent = fmt(v);
+  }
+  if (y0 < 0 && y1 > 0) svgEl('line', { x1: f.m.l, x2: f.W - f.m.r, y1: sy(0), y2: sy(0), class: 'zero' }, svg);
+  const xstep = Math.max(1, niceStep(x1 - x0, Math.max(2, Math.floor(f.pw / 80))));
+  for (let v = Math.ceil(x0 / xstep) * xstep, i = 0; v <= x1 && i < 40; v += xstep, i++) {
+    svgEl('text', { x: sx(v), y: f.H - 8, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = nf(v);
+  }
+  for (const mk of markers || []) {
+    if (mk.x < x0 || mk.x > x1) continue;
+    const x = sx(mk.x);
+    svgEl('line', { x1: x, x2: x, y1: f.m.t, y2: f.m.t + f.ph, class: 'marker' }, svg);
+    svgEl('text', { x: x + 4, y: f.m.t + 10, class: 'marker-label' }, svg).textContent = mk.label;
+  }
+}
+function placeTip(host, tip, ev) {
+  const r = host.getBoundingClientRect();
+  let left = ev.clientX - r.left + 14;
+  if (left + tip.offsetWidth > r.width) left = ev.clientX - r.left - tip.offsetWidth - 14;
+  let top = ev.clientY - r.top - tip.offsetHeight - 10;
+  if (top < -40) top = ev.clientY - r.top + 16;
+  tip.style.left = Math.max(-8, left) + 'px';
+  tip.style.top = top + 'px';
+}
+function tipRow(color, name, value) {
+  return `<div class="tip-r"><i style="background:${color}"></i><span>${esc(name)}</span><b>${value}</b></div>`;
+}
+function nearest(xs, gx) {
+  let lo = 0, hi = xs.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (xs[mid] < gx) lo = mid; else hi = mid; }
+  return Math.abs(xs[lo] - gx) <= Math.abs(xs[hi] - gx) ? lo : hi;
+}
+
+/* Linee, gradini, punti e fasce. series: {name, color, points:[{x,y}] o [{x,y0,y1}] per 'band', type, width, dash, opacity, fmt} */
+function lineChart(host, cfg) {
+  const f = frame(host, cfg.height || 250, cfg.ml || 58);
+  const series = cfg.series.filter(s => s.points && s.points.length);
+  const xs = [], ys = [];
+  for (const s of series) for (const p of s.points) {
+    if (s.type === 'band') { if (isNum(p.y0) && isNum(p.y1)) { xs.push(p.x); ys.push(p.y0, p.y1); } }
+    else if (isNum(p.y)) { xs.push(p.x); ys.push(p.y); }
+  }
+  if (!ys.length) return noData(host, cfg.empty);
+  let x0 = Math.min(...xs), x1 = Math.max(...xs);
+  if (x0 === x1) { x0 -= 1; x1 += 1; }
+  let y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (cfg.zero) { y0 = Math.min(0, y0); y1 = Math.max(0, y1); }
+  if (isNum(cfg.yMax)) y1 = Math.max(y1, cfg.yMax);
+  if (y0 === y1) { const d = Math.abs(y0) * 0.1 || 1; y0 -= d; y1 += d; }
+  const ystep = niceStep(y1 - y0, cfg.yTicks || 5);
+  y0 = Math.floor(y0 / ystep) * ystep;
+  y1 = Math.ceil(y1 / ystep) * ystep;
+  const sx = x => f.m.l + (x - x0) / (x1 - x0) * f.pw;
+  const sy = y => f.m.t + (1 - (y - y0) / (y1 - y0)) * f.ph;
+  const fmt = cfg.fmt || (v => nf(v, decFor(ystep)));
+  const tipFmt = cfg.tipFmt || (v => nf(v, cfg.tipDec ?? (Math.abs(v) >= 100 ? 0 : 1)) + (cfg.unit || ''));
+  const svg = svgEl('svg', { width: f.W, height: f.H, viewBox: `0 0 ${f.W} ${f.H}` }, host);
+  axes(svg, f, sx, sy, x0, x1, y0, y1, ystep, fmt, cfg.markers);
+  for (const s of series) {
+    if (s.type === 'band') {
+      const pts = s.points.filter(p => isNum(p.y0) && isNum(p.y1));
+      if (pts.length < 2) continue;
+      const d = 'M' + pts.map(p => `${sx(p.x).toFixed(1)},${sy(p.y1).toFixed(1)}`).join('L')
+        + 'L' + pts.slice().reverse().map(p => `${sx(p.x).toFixed(1)},${sy(p.y0).toFixed(1)}`).join('L') + 'Z';
+      svgEl('path', { d, fill: s.color, opacity: s.opacity ?? 0.16 }, svg);
+    } else if (s.type === 'dots') {
+      for (const p of s.points) if (isNum(p.y)) svgEl('circle', { cx: sx(p.x), cy: sy(p.y), r: s.r || 2.6, fill: s.color, opacity: s.opacity ?? 0.85 }, svg);
+    } else {
+      svgEl('path', {
+        d: pathD(s.points, sx, sy, s.type === 'step'), fill: 'none', stroke: s.color,
+        'stroke-width': s.width || 2, 'stroke-dasharray': s.dash, opacity: s.opacity ?? 1,
+        'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+      }, svg);
+    }
+  }
+  // interazione: linea guida e valori alla generazione piu' vicina
+  const allX = [...new Set(xs)].sort((a, b) => a - b);
+  const maps = series.map(s => new Map(s.points.map(p => [p.x, p])));
+  const guide = svgEl('line', { y1: f.m.t, y2: f.m.t + f.ph, class: 'guide', visibility: 'hidden' }, svg);
+  const marks = svgEl('g', {}, svg);
+  const hit = svgEl('rect', { x: f.m.l, y: f.m.t, width: f.pw, height: f.ph, fill: 'transparent' }, svg);
+  const tip = document.createElement('div');
+  tip.className = 'tip'; tip.hidden = true; host.appendChild(tip);
+  const card = palette().card;
+  hit.addEventListener('pointermove', ev => {
+    const r = svg.getBoundingClientRect();
+    const gx = x0 + ((ev.clientX - r.left) * (f.W / r.width) - f.m.l) / f.pw * (x1 - x0);
+    const x = allX[nearest(allX, gx)];
+    const X = sx(x);
+    guide.setAttribute('x1', X); guide.setAttribute('x2', X); guide.setAttribute('visibility', 'visible');
+    marks.innerHTML = '';
+    let rows = '';
+    series.forEach((s, i) => {
+      if (s.noTip) return;
+      const p = maps[i].get(x);
+      if (!p) return;
+      if (s.type === 'band') {
+        if (isNum(p.y0)) rows += tipRow(s.color, s.name, `${tipFmt(p.y0)} – ${tipFmt(p.y1)}`);
+        return;
+      }
+      if (!isNum(p.y)) return;
+      svgEl('circle', { cx: X, cy: sy(p.y), r: 4, fill: s.color, stroke: card, 'stroke-width': 2 }, marks);
+      rows += tipRow(s.color, s.name, (s.fmt || tipFmt)(p.y));
+    });
+    tip.innerHTML = `<div class="tip-h">Generazione ${nf(x)}</div>${rows || '<span class="muted">nessun valore</span>'}`;
+    tip.hidden = false;
+    placeTip(host, tip, ev);
+  });
+  hit.addEventListener('pointerleave', () => { tip.hidden = true; guide.setAttribute('visibility', 'hidden'); marks.innerHTML = ''; });
+}
+
+/* Aree impilate: xs, layers [{name, color, values}] allineati a xs */
+function stackChart(host, cfg) {
+  const f = frame(host, cfg.height || 250, cfg.ml || 50);
+  const xs = cfg.xs;
+  if (xs.length < 2) return noData(host, 'Servono almeno due generazioni.');
+  const tot = xs.map((_, i) => cfg.layers.reduce((s, L) => s + (L.values[i] || 0), 0));
+  let y1 = Math.max(...tot, 0);
+  if (y1 <= 0) y1 = 1;
+  const ystep = niceStep(y1, cfg.yTicks || 4);
+  y1 = Math.ceil(y1 / ystep) * ystep;
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  const sx = x => f.m.l + (x - x0) / (x1 - x0) * f.pw;
+  const sy = y => f.m.t + (1 - y / y1) * f.ph;
+  const fmt = cfg.fmt || (v => nf(v, decFor(ystep)));
+  const svg = svgEl('svg', { width: f.W, height: f.H, viewBox: `0 0 ${f.W} ${f.H}` }, host);
+  axes(svg, f, sx, sy, x0, x1, 0, y1, ystep, fmt, cfg.markers);
+  let base = xs.map(() => 0);
+  for (const L of cfg.layers) {
+    const top = base.map((b, i) => b + (L.values[i] || 0));
+    const up = xs.map((x, i) => `${sx(x).toFixed(1)},${sy(top[i]).toFixed(1)}`);
+    const down = xs.map((x, i) => `${sx(x).toFixed(1)},${sy(base[i]).toFixed(1)}`).reverse();
+    svgEl('path', { d: 'M' + up.join('L') + 'L' + down.join('L') + 'Z', fill: L.color, opacity: 0.88, stroke: palette().card, 'stroke-width': 0.4 }, svg);
+    base = top;
+  }
+  const guide = svgEl('line', { y1: f.m.t, y2: f.m.t + f.ph, class: 'guide', visibility: 'hidden' }, svg);
+  const hit = svgEl('rect', { x: f.m.l, y: f.m.t, width: f.pw, height: f.ph, fill: 'transparent' }, svg);
+  const tip = document.createElement('div');
+  tip.className = 'tip'; tip.hidden = true; host.appendChild(tip);
+  const tdec = cfg.tipDec ?? 1;
+  hit.addEventListener('pointermove', ev => {
+    const r = svg.getBoundingClientRect();
+    const gx = x0 + ((ev.clientX - r.left) * (f.W / r.width) - f.m.l) / f.pw * (x1 - x0);
+    const i = nearest(xs, gx);
+    const X = sx(xs[i]);
+    guide.setAttribute('x1', X); guide.setAttribute('x2', X); guide.setAttribute('visibility', 'visible');
+    const rows = cfg.layers.map(L => ({ L, v: L.values[i] || 0 })).filter(o => o.v > 0)
+      .sort((a, b) => b.v - a.v).slice(0, cfg.tipMax || 12)
+      .map(o => tipRow(o.L.color, o.L.name, nf(o.v, tdec))).join('');
+    tip.innerHTML = `<div class="tip-h">Generazione ${nf(xs[i])}</div>${rows}<div class="tip-r" style="margin-top:4px"><span>${esc(cfg.totalLabel || 'Totale')}</span><b>${nf(tot[i], tdec)}</b></div>`;
+    tip.hidden = false;
+    placeTip(host, tip, ev);
+  });
+  hit.addEventListener('pointerleave', () => { tip.hidden = true; guide.setAttribute('visibility', 'hidden'); });
+}
+
+/* Barre verticali con linea della media: items [{label, value}] */
+function barChart(host, cfg) {
+  const f = frame(host, cfg.height || 230, cfg.ml || 58);
+  const items = cfg.items.filter(it => isNum(it.value));
+  if (!items.length) return noData(host, cfg.empty);
+  let y0 = Math.min(0, ...items.map(i => i.value)), y1 = Math.max(0, ...items.map(i => i.value));
+  if (y0 === y1) y1 = 1;
+  const ystep = niceStep(y1 - y0, 5);
+  y0 = Math.floor(y0 / ystep) * ystep; y1 = Math.ceil(y1 / ystep) * ystep;
+  const sy = y => f.m.t + (1 - (y - y0) / (y1 - y0)) * f.ph;
+  const svg = svgEl('svg', { width: f.W, height: f.H, viewBox: `0 0 ${f.W} ${f.H}` }, host);
+  for (let v = y0, i = 0; v <= y1 + ystep / 2 && i < 40; v += ystep, i++) {
+    svgEl('line', { x1: f.m.l, x2: f.W - f.m.r, y1: sy(v), y2: sy(v), class: v === 0 ? 'zero' : 'grid-l' }, svg);
+    svgEl('text', { x: f.m.l - 8, y: sy(v) + 4, class: 'tick', 'text-anchor': 'end' }, svg).textContent = nf(v, decFor(ystep));
+  }
+  const bw = f.pw / items.length;
+  const tip = document.createElement('div');
+  tip.className = 'tip'; tip.hidden = true; host.appendChild(tip);
+  items.forEach((it, i) => {
+    const x = f.m.l + i * bw + bw * 0.18, w = bw * 0.64;
+    const yA = sy(Math.max(0, it.value)), yB = sy(Math.min(0, it.value));
+    const rect = svgEl('rect', { x, y: yA, width: w, height: Math.max(1, yB - yA), rx: 3, fill: it.value < 0 ? cfg.negColor : cfg.color }, svg);
+    svgEl('text', { x: x + w / 2, y: f.H - 8, class: 'tick', 'text-anchor': 'middle' }, svg).textContent = it.label;
+    rect.addEventListener('pointermove', ev => { tip.innerHTML = it.tip; tip.hidden = false; placeTip(host, tip, ev); });
+    rect.addEventListener('pointerleave', () => { tip.hidden = true; });
+  });
+  if (isNum(cfg.mean)) {
+    svgEl('line', { x1: f.m.l, x2: f.W - f.m.r, y1: sy(cfg.mean), y2: sy(cfg.mean), stroke: cfg.meanColor, 'stroke-width': 2, 'stroke-dasharray': '6 4' }, svg);
+    svgEl('text', { x: f.W - f.m.r, y: sy(cfg.mean) - 6, class: 'marker-label', 'text-anchor': 'end' }, svg).textContent = 'media ' + nf(cfg.mean);
+  }
+}
+
+function spark(values, color) {
+  const v = values.filter(isNum);
+  if (v.length < 2) return '<svg class="spark"></svg>';
+  const W = 200, H = 34;
+  const lo = Math.min(...v), hi = Math.max(...v), r = hi - lo || 1;
+  const n = values.length - 1 || 1;
+  let d = '', pen = false;
+  values.forEach((y, i) => {
+    if (!isNum(y)) { pen = false; return; }
+    const X = (i / n * W).toFixed(1), Y = (H - 3 - (y - lo) / r * (H - 6)).toFixed(1);
+    d += (pen ? 'L' : 'M') + X + ',' + Y; pen = true;
+  });
+  return `<svg class="spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><path d="${d}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/></svg>`;
+}
+
+/* ───────── struttura delle card ───────── */
+function card(id, title, how, tip) {
+  const host = document.getElementById(id);
+  host.innerHTML = `<div class="card-h"><h3>${esc(title)}</h3><span class="slot"></span></div>`
+    + (how ? `<p class="card-how">${how}</p>` : '') + '<div class="body"></div><div class="legend"></div>';
+  if (tip) $('.card-h h3', host).insertAdjacentHTML('beforeend', ` <span class="info" tabindex="0" data-tip="${esc(tip)}">?</span>`);
+  return { host, body: $('.body', host), slot: $('.slot', host), legend: $('.legend', host) };
+}
+function legend(el, items) {
+  el.innerHTML = items.map(it => {
+    const cls = it.kind === 'dot' ? 'dot' : it.kind === 'dash' ? 'dash' : it.kind === 'band' ? 'band' : '';
+    const style = (it.kind === 'dash' ? `border-color:${it.color}` : `background:${it.color}`) + (it.opacity ? `;opacity:${it.opacity}` : '');
+    return `<span><i class="${cls}" style="${style}"></i>${esc(it.name)}</span>`;
+  }).join('');
+}
+function newCard(parent, id) {
+  const a = document.createElement('article');
+  a.className = 'card'; a.id = id;
+  parent.appendChild(a);
+  return id;
+}
+
+/* ───────── dati ───────── */
+const get = (o, path) => path.split('.').reduce((v, k) => (v == null ? v : v[k]), o);
+function pts(H, fn) { return H.map(r => { let y = null; try { y = fn(r); } catch (e) { y = null; } return { x: r.gen, y: isNum(y) ? y : null }; }); }
+function prepHistory(data) {
+  const byGen = new Map();
+  for (const r of data.history || []) byGen.set(r.gen, r);   // generazione ripetuta dopo una ripresa: vale l'ultima
+  return [...byGen.values()].sort((a, b) => a.gen - b.gen);
+}
+function inRange(all) {
+  if (S.range === 'all') return all;
+  return all.slice(-Number(S.range));
+}
+function markersFor(H) {
+  const out = [];
+  for (let i = 1; i < H.length; i++) {
+    if (H[i].fv !== H[i - 1].fv) out.push({ x: H[i].gen, label: 'fitness v' + H[i].fv });
+    else if (H[i].session !== H[i - 1].session) out.push({ x: H[i].gen, label: 'ripresa' });
+  }
+  return out;
+}
+const totalKills = s => s ? (s.kills || 0) + (s.missile_kills || 0) + (s.bomb_kills || 0) : null;
+
+/* ───────── stato live ───────── */
+const PHASES = {
+  avvio: 'Avvio del training',
+  rivalutazione: 'Rivalutazione del record sulle partite di validazione',
+  valutazione: 'Valutazione dei genomi',
+  validazione: 'Validazione dei migliori su partite fisse',
+  fermo: 'Fermo',
+};
+function renderStatus() {
+  const L = S.live, el = $('#status');
+  if (!L) { el.innerHTML = '<div class="status-line"><span class="pill"><span class="dot"></span>Nessun dato live</span><span class="muted">il training non è mai stato avviato con questa dashboard</span></div>'; return; }
+  const age = (Date.now() - L.updated) / 1000;
+  let pill, text = '', bar = '';
+  if (L.phase === 'fermo') {
+    pill = '<span class="pill"><span class="dot"></span>Fermo</span>';
+    text = `<span class="muted">fermato alle ${clock(L.updated)} · ultima generazione ${nf(L.gen - 1)}</span>`;
+  } else if (age > 180) {
+    pill = '<span class="pill warn"><span class="dot"></span>Nessun aggiornamento</span>';
+    text = `<span class="muted">da ${dur(age)}: il training potrebbe essersi chiuso senza salvare lo stato</span>`;
+  } else {
+    pill = '<span class="pill live"><span class="dot"></span>In corso</span>';
+    text = `<span><b>Generazione ${nf(L.gen)}</b> · ${esc(PHASES[L.phase] || L.phase)}</span>`;
+    if (L.total > 0) {
+      const p = Math.min(100, L.done / L.total * 100);
+      let eta = '';
+      if (L.phase === 'valutazione' && L.gen_start && L.done > 0) {
+        const el2 = (L.updated - L.gen_start) / 1000;
+        eta = ` · circa ${dur(el2 / L.done * (L.total - L.done))} alla validazione`;
+      }
+      text += `<span class="muted num">${L.done}/${L.total}${eta}</span>`;
+      bar = `<div class="progress ${L.phase === 'valutazione' ? '' : 'val'}"><span style="width:${p.toFixed(1)}%"></span></div>`;
+    }
+    if (L.session_start) text += `<span class="muted">sessione ${dur((L.updated - L.session_start) / 1000)}</span>`;
+  }
+  el.innerHTML = `<div class="status-line">${pill}${text}</div>${bar}`;
+}
+
+/* ───────── giudizio sintetico ───────── */
+function renderVerdict(all, D) {
+  const fv = D.static.fitness_version;
+  const H = all.filter(r => r.fv === fv);
+  const el = $('#verdict');
+  if (!H.length) {
+    el.innerHTML = `<div class="verdict-h"><span class="big">In attesa della prima generazione</span></div><p class="muted">Con la fitness v${fv} non c'è ancora nessuna generazione completata: il giudizio compare alla fine della prima.</p>`;
+    return;
+  }
+  const last = H[H.length - 1];
+  const items = [];
+  // record
+  const win = H.slice(-50);
+  let lastImp = -1;
+  for (let i = H.length - 1; i >= 0; i--) if (H[i].new_record) { lastImp = i; break; }
+  const since = lastImp >= 0 ? last.gen - H[lastImp].gen : null;
+  const nImp = win.filter(r => r.new_record).length;
+  const recDelta = isNum(last.record) && isNum(win[0].record) ? last.record - win[0].record : null;
+  let recText = `<b>Record di validazione ${nf(last.record)}</b>. `;
+  if (nImp) {
+    recText += `Migliorato ${nImp} ${nImp === 1 ? 'volta' : 'volte'} nelle ultime ${win.length} generazioni`
+      + (recDelta > 0 ? ` (${sgn(recDelta)})` : '') + '; ultimo miglioramento '
+      + (since === 0 ? 'in quest\'ultima generazione.' : `${since} generazioni fa.`);
+  } else {
+    recText += since === null
+      ? `Nessun nuovo record nelle ${H.length} generazioni registrate con questa fitness.`
+      : `Nessun miglioramento nelle ultime ${win.length} generazioni (l'ultimo ${since} generazioni fa).`;
+  }
+  const sinceEff = since === null ? H.length : since;
+  items.push({ lv: sinceEff <= 20 ? 'good' : sinceEff <= 60 ? 'warn' : 'bad', t: recText });
+  // popolazione
+  const t = trend(H.map(r => get(r, 'fit.mean')));
+  if (!t) items.push({ lv: 'info', t: `Servono almeno 8 generazioni con questa fitness per stimare la tendenza della popolazione (ora ${H.length}).` });
+  else if (t.dir > 0) items.push({ lv: 'good', t: `La fitness media della popolazione <b>migliora</b>: ${sgn(t.pct, 0)}% nelle ultime ${t.k} generazioni rispetto alle ${t.k} precedenti.` });
+  else if (t.dir < 0) items.push({ lv: 'bad', t: `La fitness media della popolazione <b>cala</b>: ${sgn(t.pct, 0)}% nelle ultime ${t.k} generazioni rispetto alle ${t.k} precedenti.` });
+  else items.push({ lv: 'warn', t: `La fitness media della popolazione è <b>stabile</b>: tra le ultime ${t.k} generazioni e le ${t.k} precedenti la differenza rientra nel rumore delle partite.` });
+  // come gioca il record
+  const rs = get(D, 'snapshot.record.stats');
+  const maxS = D.static.max_episode_s;
+  if (rs) {
+    let s = `In partita il record fa in media <b>${nf(rs.score)} punti</b>, sopravvive <b>${nf(rs.surv)} s</b> su un massimo di ${nf(maxS)} e arriva al livello ${nf(rs.level, 1)} (${D.static.validation_seeds} partite fisse, ${nf(rs.lives_lost, 1)} vite perse in media).`;
+    if (rs.surv >= 0.9 * maxS) s += ' Arriva quasi sempre alla fine dell\'episodio: per distinguere i genomi migliori serviranno partite più lunghe.';
+    items.push({ lv: 'info', t: s });
+  }
+  // abitudini da tenere d'occhio
+  const ts = last.top_stats || {};
+  if (ts.idle_pct > 25) items.push({ lv: 'warn', t: `I migliori 10% passano il <b>${nf(ts.idle_pct)}% del tempo fermi</b>, di solito spingendo contro un bordo.` });
+  if (ts.missiles > 0.5 && ts.missiles_fired < 0.5 * ts.missiles) items.push({ lv: 'warn', t: `I migliori 10% lanciano solo ${nf(ts.missiles_fired, 1)} dei ${nf(ts.missiles, 1)} missili che raccolgono in media.` });
+  // diversita'
+  const sp = last.species || {};
+  const maxStag = D.static.max_stagnation;
+  if (sp.n <= 2) items.push({ lv: 'warn', t: `Solo ${sp.n} specie: poca diversità. La soglia di compatibilità si abbassa da sola per crearne di nuove.` });
+  else if (sp.max_stag >= maxStag - 3) items.push({ lv: 'warn', t: `${sp.n} specie. Almeno una non migliora da ${sp.max_stag} generazioni: NEAT la elimina a ${maxStag}, salvo le ${D.static.species_elitism} migliori che restano protette.` });
+  else items.push({ lv: 'good', t: `${sp.n} specie attive, nessuna vicina all'eliminazione per stallo (al massimo ${sp.max_stag} generazioni senza migliorare su ${maxStag}).` });
+  // ritmo
+  const secs = H.slice(-10).map(r => r.secs).filter(isNum);
+  if (secs.length) items.push({ lv: 'info', t: `Una generazione richiede in media ${dur(mean(secs))} (ultime ${secs.length}), cioè circa ${nf(3600 / mean(secs))} generazioni all'ora.` });
+
+  let head, cls;
+  if ((since !== null && since <= 20) || (t && t.dir > 0)) { head = 'Il training sta migliorando'; cls = 'good'; }
+  else if (sinceEff > 60 && (!t || t.dir <= 0)) { head = 'Il training è in stallo'; cls = 'bad'; }
+  else { head = 'Il training è stabile, senza progressi netti recenti'; cls = 'neutral'; }
+  const versions = new Set(all.map(r => r.fv));
+  const note = versions.size > 1 ? `<p class="muted" style="margin:10px 0 0;font-size:12.5px">I grafici includono generazioni con versioni della fitness diverse (linee tratteggiate “fitness v…”): i valori prima e dopo un cambio di versione non sono confrontabili. Il giudizio usa solo la versione ${fv}.</p>` : '';
+  const icon = { good: '✓', bad: '!', warn: '!', info: 'i' };
+  el.innerHTML = `<div class="verdict-h"><span class="big">${head}</span><span class="tag ${cls}">generazione ${nf(last.gen)}</span></div>`
+    + '<ul>' + items.map(it => `<li><span class="ic ${it.lv}">${icon[it.lv]}</span><span>${it.t}</span></li>`).join('') + '</ul>' + note;
+}
+
+/* ───────── indicatori ───────── */
+function renderKpis(all, H, D, C) {
+  const fv = D.static.fitness_version;
+  const HV = all.filter(r => r.fv === fv);
+  const last = HV[HV.length - 1] || all[all.length - 1];
+  const rs = get(D, 'snapshot.record.stats') || last.record_stats || {};
+  const ago = HV.length > 50 ? HV[HV.length - 51] : HV[0];
+  const recDelta = isNum(last.record) && ago && isNum(ago.record) ? last.record - ago.record : null;
+  const span = ago ? last.gen - ago.gen : 0;
+  const fitRoll = rolling(HV.map(r => get(r, 'fit.mean')));
+  const topRoll = rolling(HV.map(r => get(r, 'top_stats.score')));
+  const Hv = H.filter(r => r.fv === fv);
+  const cards = [
+    {
+      l: 'Record di validazione', v: nf(last.record),
+      s: span > 0 ? `<span style="color:${recDelta > 0 ? C.good : C.muted}">${recDelta > 0 ? sgn(recDelta) : 'nessun miglioramento'}</span> nelle ultime ${span} gen` : 'fitness media su 10 partite fisse',
+      sp: spark(Hv.map(r => r.record), C.record),
+      tip: 'Fitness media del genoma salvato (best_genome.pkl, quello usato in coop) sulle 10 partite di validazione, sempre le stesse. Sale solo quando un genoma gioca davvero meglio: è la misura più affidabile del progresso.',
+    },
+    {
+      l: 'Punti del record', v: nf(rs.score), u: 'punti',
+      s: `${nf(totalKills(rs), 1)} uccisioni a partita`,
+      sp: spark(Hv.map(r => get(r, 'record_stats.score')), C.record),
+      tip: 'Score di gioco medio del record nelle 10 partite di validazione: è il punteggio che vedresti giocando con lui.',
+    },
+    {
+      l: 'Sopravvivenza del record', v: nf(rs.surv), u: 's',
+      s: `su ${nf(D.static.max_episode_s)} s · livello ${nf(rs.level, 1)}`,
+      sp: spark(Hv.map(r => get(r, 'record_stats.surv')), C.record),
+      tip: 'Secondi giocati in media dal record prima di perdere tutte le vite, nelle 10 partite di validazione (massimo: la durata dell\'episodio).',
+    },
+    {
+      l: 'Fitness media popolazione', v: nf(fitRoll[fitRoll.length - 1]),
+      s: trendBadge(trend(HV.map(r => get(r, 'fit.mean')))),
+      sp: spark(rolling(Hv.map(r => get(r, 'fit.mean'))), C.pop),
+      tip: 'Media della fitness di tutti i genomi, come media mobile delle ultime 10 generazioni (le partite cambiano a ogni generazione, quindi il singolo valore oscilla).',
+    },
+    {
+      l: 'Punti dei migliori 10%', v: nf(topRoll[topRoll.length - 1]), u: 'punti',
+      s: trendBadge(trend(HV.map(r => get(r, 'top_stats.score')))),
+      sp: spark(rolling(Hv.map(r => get(r, 'top_stats.score'))), C.top),
+      tip: 'Score medio dei genomi con la fitness più alta (il 10% della popolazione) nelle partite di training, media mobile di 10 generazioni.',
+    },
+    {
+      l: 'Specie attive', v: nf(get(last, 'species.n')),
+      s: `soglia ${nf(get(last, 'species.threshold'), 2)} · stallo max ${nf(get(last, 'species.max_stag'))}/${nf(D.static.max_stagnation)}`,
+      sp: spark(H.map(r => get(r, 'species.n')), C.val),
+      tip: 'Numero di specie (gruppi di reti simili). Più specie = più diversità. Una specie che non migliora per ' + D.static.max_stagnation + ' generazioni viene eliminata.',
+    },
+  ];
+  $('#kpis').innerHTML = cards.map(c => `<div class="card kpi"><div class="kpi-l">${esc(c.l)}<span class="info" tabindex="0" data-tip="${esc(c.tip)}">?</span></div>
+    <div class="kpi-v">${c.v}${c.u ? `<small>${c.u}</small>` : ''}</div><div class="kpi-s">${c.s}</div>${c.sp}</div>`).join('');
+}
+
+/* ───────── sezioni ───────── */
+function renderProgress(H, D, C, mk) {
+  let c = card('c-progress', 'Progresso reale: record e migliori validati',
+    `Ogni generazione i ${D.static.validation_top_k} genomi con la fitness più alta rigiocano le stesse ${D.static.validation_seeds} partite. I punti blu sono il migliore validato di ogni generazione; la linea verde è il <b>record</b>, il genoma salvato e usato in coop, che sale solo quando un genoma fa meglio su quelle partite. Punti blu vicini alla linea verde: la popolazione si mantiene al livello del record.`,
+    'La fitness di validazione non include il bonus di imitazione ed è calcolata su partite intere, senza interruzioni anticipate.');
+  lineChart(c.body, {
+    height: 290, markers: mk,
+    series: [
+      { name: 'Migliore validato della generazione', color: C.val, type: 'dots', points: pts(H, r => get(r, 'val.mean')) },
+      { name: 'Record', color: C.record, type: 'step', width: 2.6, points: pts(H, r => r.record) },
+    ],
+  });
+  legend(c.legend, [{ name: 'Record (best_genome.pkl)', color: C.record }, { name: 'Migliore validato della generazione', color: C.val, kind: 'dot' }]);
+  const recNow = H.length ? H[H.length - 1].record : null;
+  c.slot.innerHTML = isNum(recNow) ? `<span class="badge flat">record ${nf(recNow)}</span>` : '';
+
+  c = card('c-fitness', 'Fitness della popolazione',
+    `Ogni genoma gioca ${D.static.episodes_per_genome} partite nuove a ogni generazione (le stesse per tutti), quindi la curva oscilla: la tendenza si legge sulla <b>media mobile</b> (linea spessa). La fascia contiene l'80% centrale dei genomi.`,
+    'Include il bonus di imitazione. Il massimo della generazione è spesso un genoma fortunato: per questo il record si decide in validazione.');
+  const fitRoll = rolling(H.map(r => get(r, 'fit.mean')));
+  lineChart(c.body, {
+    height: 260, markers: mk,
+    series: [
+      { name: '80% centrale (10°–90° percentile)', color: C.pop, type: 'band', points: H.map(r => ({ x: r.gen, y0: get(r, 'fit.p10'), y1: get(r, 'fit.p90') })) },
+      { name: 'Massimo della generazione', color: C.faint, type: 'dots', r: 2, points: pts(H, r => get(r, 'fit.max')) },
+      { name: 'Media', color: C.pop, width: 1.2, opacity: 0.55, points: pts(H, r => get(r, 'fit.mean')) },
+      { name: 'Media mobile (10 gen)', color: C.pop, width: 3, points: H.map((r, i) => ({ x: r.gen, y: fitRoll[i] })) },
+    ],
+  });
+  legend(c.legend, [{ name: 'Media mobile (10 gen)', color: C.pop }, { name: 'Media della generazione', color: C.pop, opacity: 0.45 }, { name: '80% centrale', color: C.pop, kind: 'band' }, { name: 'Massimo', color: C.faint, kind: 'dot' }]);
+  c.slot.innerHTML = trendBadge(trend(H.filter(r => r.fv === D.static.fitness_version).map(r => get(r, 'fit.mean'))));
+
+  const rec = get(D, 'snapshot.record');
+  c = card('c-seeds', 'Le partite di validazione del record',
+    'Fitness del record in ciascuna delle partite fisse. Barre molto diverse tra loro significano che il risultato dipende molto dalla partita: un buon genoma deve andare bene in tutte.',
+    'Le partite di validazione usano seed fissi, fuori dalla serie usata in training.');
+  if (rec && rec.per_seed) {
+    const vals = rec.per_seed;
+    const m = mean(vals.filter(isNum));
+    barChart(c.body, {
+      height: 260, color: C.record, negColor: C.bad, mean: m, meanColor: C.text,
+      items: vals.map((v, i) => ({ label: String(i + 1), value: v, tip: `<div class="tip-h">Partita ${i + 1}</div>${tipRow(C.record, 'fitness', nf(v))}<div class="tip-r"><span>seed ${esc(String((rec.seeds || [])[i] ?? ''))}</span></div>` })),
+    });
+    const sd = Math.sqrt(variance(vals.filter(isNum)));
+    c.slot.innerHTML = `<span class="badge flat">genoma ${esc(String(rec.key))} · dev. std ${nf(sd)}</span>`;
+  } else noData(c.body, 'Il dettaglio compare alla fine della prima generazione.');
+}
+
+function renderGame(H, D, C, mk) {
+  const fmtS = v => nf(v, 0) + ' s';
+  let c = card('c-score', 'Punti per partita',
+    'Score di gioco. "Migliori 10%" sono i genomi con la fitness più alta nelle partite di training; il record è misurato sulle partite fisse di validazione.');
+  lineChart(c.body, {
+    height: 240, markers: mk, zero: true, series: [
+      { name: 'Popolazione (media)', color: C.faint, width: 1.6, points: pts(H, r => get(r, 'pop_stats.score')) },
+      { name: 'Migliori 10%', color: C.top, width: 2.2, points: pts(H, r => get(r, 'top_stats.score')) },
+      { name: 'Record (validazione)', color: C.record, type: 'step', width: 2.4, points: pts(H, r => get(r, 'record_stats.score')) },
+    ],
+  });
+  legend(c.legend, [{ name: 'Record', color: C.record }, { name: 'Migliori 10%', color: C.top }, { name: 'Popolazione', color: C.faint }]);
+  c.slot.innerHTML = trendBadge(trend(H.filter(r => r.fv === D.static.fitness_version).map(r => get(r, 'top_stats.score'))), 'up', 0);
+
+  c = card('c-surv', 'Sopravvivenza',
+    `Secondi giocati prima della fine della partita. In training la partita finisce alla durata massima (tratteggio), dopo ${D.static.early_stop_lives} vite perse (dalla generazione ${D.static.early_stop_lives_gen}) o se la nave resta ferma per il ${nf(D.static.early_stop_idle_pct)}% del tempo. In validazione si gioca fino all'ultima vita.`);
+  lineChart(c.body, {
+    height: 240, markers: mk, zero: true, unit: ' s', tipDec: 0, fmt: v => nf(v, 0),
+    series: [
+      { name: 'Durata massima dell\'episodio', color: C.faint, width: 1.5, dash: '6 5', points: pts(H, r => r.max_s), fmt: fmtS },
+      { name: 'Popolazione (media)', color: C.faint, width: 1.6, points: pts(H, r => get(r, 'pop_stats.surv')), fmt: fmtS },
+      { name: 'Migliori 10%', color: C.top, width: 2.2, points: pts(H, r => get(r, 'top_stats.surv')), fmt: fmtS },
+      { name: 'Record (validazione)', color: C.record, type: 'step', width: 2.4, points: pts(H, r => get(r, 'record_stats.surv')), fmt: fmtS },
+    ],
+  });
+  legend(c.legend, [{ name: 'Record', color: C.record }, { name: 'Migliori 10%', color: C.top }, { name: 'Popolazione', color: C.faint }, { name: 'Durata massima', color: C.faint, kind: 'dash' }]);
+  c.slot.innerHTML = trendBadge(trend(H.filter(r => r.fv === D.static.fitness_version).map(r => get(r, 'top_stats.surv'))));
+
+  c = card('c-level', 'Livello raggiunto',
+    'Il livello sale con lo score e porta nemici più veloci e numerosi. Arrivare più in alto significa reggere una difficoltà maggiore.');
+  lineChart(c.body, {
+    height: 240, markers: mk, tipDec: 1, series: [
+      { name: 'Popolazione (media)', color: C.faint, width: 1.6, points: pts(H, r => get(r, 'pop_stats.level')) },
+      { name: 'Migliori 10%', color: C.top, width: 2.2, points: pts(H, r => get(r, 'top_stats.level')) },
+      { name: 'Record (validazione)', color: C.record, type: 'step', width: 2.4, points: pts(H, r => get(r, 'record_stats.level')) },
+    ],
+  });
+  legend(c.legend, [{ name: 'Record', color: C.record }, { name: 'Migliori 10%', color: C.top }, { name: 'Popolazione', color: C.faint }]);
+  c.slot.innerHTML = trendBadge(trend(H.filter(r => r.fv === D.static.fitness_version).map(r => get(r, 'top_stats.level'))));
+
+  c = card('c-kills', 'Uccisioni per arma (migliori 10%)',
+    'Nemici distrutti per partita dai migliori 10%, divisi per arma: mostra se l\'AI impara a usare anche missili e bombe.');
+  stackChart(c.body, {
+    height: 240, xs: H.map(r => r.gen), markers: mk, totalLabel: 'Totale uccisioni',
+    layers: [
+      { name: 'Proiettili', color: C.val, values: H.map(r => get(r, 'top_stats.kills') || 0) },
+      { name: 'Missili', color: C.pop, values: H.map(r => get(r, 'top_stats.missile_kills') || 0) },
+      { name: 'Bomba', color: C.top, values: H.map(r => get(r, 'top_stats.bomb_kills') || 0) },
+    ],
+  });
+  legend(c.legend, [{ name: 'Proiettili', color: C.val }, { name: 'Missili', color: C.pop }, { name: 'Bomba', color: C.top }]);
+}
+
+function renderBehaviour(H, D, C, mk) {
+  const box = $('#behaviour');
+  box.innerHTML = '';
+  const fv = D.static.fitness_version;
+  const HV = H.filter(r => r.fv === fv);
+  const defs = [
+    { id: 'b-idle', t: 'Tempo fermo', k: 'idle_pct', unit: '%', better: 'down',
+      how: 'Quota del tempo in cui la nave non si sposta, anche spingendo contro un bordo. È penalizzata (−15 al secondo): più bassa è meglio.' },
+    { id: 'b-acc', t: 'Precisione', k: 'accuracy', unit: '%', better: 'up',
+      how: 'Raffiche andate a segno su quelle sparate.' },
+    { id: 'b-lives', t: 'Vite perse per partita', k: 'lives_lost', unit: '', better: 'down',
+      how: `In training la partita si ferma a ${D.static.early_stop_lives} vite perse dalla generazione ${D.static.early_stop_lives_gen}: valori vicini a ${D.static.early_stop_lives} significano che quasi tutti muoiono prima della durata massima.` },
+    { id: 'b-missiles', t: 'Missili: raccolti e lanciati', k: 'missiles_fired', unit: '', better: 'up', extra: 'missiles',
+      how: 'Missili raccolti e lanciati per partita (migliori 10%). Se la linea dei lanciati sta molto sotto quella dei raccolti, l\'AI spreca i missili.' },
+    { id: 'b-bombs', t: 'Bombe usate', k: 'bombs_used', unit: '', better: 'up',
+      how: 'Bombe fatte esplodere per partita: la bomba cancella i nemici sullo schermo.' },
+    { id: 'b-pu', t: 'Potenziamenti raccolti', k: 'powerups', unit: '', better: 'up',
+      how: 'Power-up di arma, motore e scudo raccolti per partita: rendono la nave più forte.' },
+  ];
+  for (const d of defs) {
+    newCard(box, d.id);
+    const c = card(d.id, d.t, d.how);
+    const series = [
+      { name: 'Popolazione', color: C.faint, width: 1.5, points: pts(H, r => get(r, 'pop_stats.' + d.k)) },
+      { name: d.extra ? 'Lanciati (migliori 10%)' : 'Migliori 10%', color: C.top, width: 2.2, points: pts(H, r => get(r, 'top_stats.' + d.k)) },
+    ];
+    if (d.extra) {
+      series[0] = { name: 'Raccolti (migliori 10%)', color: C.pop, width: 1.8, dash: '5 4', points: pts(H, r => get(r, 'top_stats.' + d.extra)) };
+    }
+    lineChart(c.body, { height: 170, ml: 44, yTicks: 3, zero: true, markers: mk, unit: d.unit, tipDec: 1, series });
+    legend(c.legend, series.map(s => ({ name: s.name, color: s.color, kind: s.dash ? 'dash' : '' })));
+    const last = HV[HV.length - 1];
+    const now = last ? get(last, 'top_stats.' + d.k) : null;
+    c.slot.innerHTML = `<span class="badge flat">${nf(now, 1)}${d.unit}</span> ` + trendBadge(trend(HV.map(r => get(r, 'top_stats.' + d.k))), d.better);
+  }
+}
+
+function renderComposition(all, H, D, C, mk) {
+  const fv = D.static.fitness_version;
+  const HV = all.filter(r => r.fv === fv);
+  const last = HV[HV.length - 1];
+  const comps = D.static.components;
+  const rec = get(D, 'snapshot.record.comp');
+  const pop = last ? last.comp_pop || {} : {};
+  let c = card('c-comp', 'Scomposizione della fitness',
+    'Ogni riga è un premio (verde) o una penalità (rossa). Barra piena: il record, media delle partite di validazione. Barra chiara: la media della popolazione nell\'ultima generazione. Passa sul nome per la spiegazione.');
+  if (!last && !rec) { noData(c.body); }
+  else {
+    const rows = comps.map(k => ({ ...k, r: rec ? rec[k.key] ?? 0 : null, p: pop[k.key] ?? 0 }));
+    rows.sort((a, b) => Math.max(Math.abs(b.r || 0), Math.abs(b.p)) - Math.max(Math.abs(a.r || 0), Math.abs(a.p)));
+    const max = Math.max(1, ...rows.map(r => Math.max(Math.abs(r.r || 0), Math.abs(r.p))));
+    const bar = (v, cls) => {
+      if (!isNum(v) || v === 0) return `<div class="cb ${cls}"></div>`;
+      return `<div class="cb ${cls}"><span class="${v < 0 ? 'neg' : 'pos'}" style="--w:${(Math.abs(v) / max * 50).toFixed(2)}%"></span></div>`;
+    };
+    let html = '<div class="comp"><div class="comp-row head"><span>Componente e peso</span><span class="bars-h"></span><span class="num">Record</span><span class="num">Popolaz.</span></div>';
+    // componenti quasi nulli in entrambe le colonne: una riga riassuntiva
+    const small = rows.filter(r => Math.abs(r.r || 0) < 0.5 && Math.abs(r.p) < 0.5);
+    for (const r of rows.filter(r => !small.includes(r))) {
+      html += `<div class="comp-row"><div class="comp-name" title="${esc(r.desc)}">${esc(r.label)}<small>${esc(r.weight)}</small></div>
+        <div class="bars">${bar(r.r, '')}${bar(r.p, 'pop')}</div>
+        <div class="num">${rec ? sgn(r.r) : '–'}</div><div class="num muted">${sgn(r.p)}</div></div>`;
+    }
+    if (small.length) html += `<div class="comp-row"><div class="comp-name faint" style="grid-column:1/-1">Valgono circa zero: ${small.map(r => `<span title="${esc(r.desc + ' (' + r.weight + ')')}">${esc(r.label)}</span>`).join(', ')}.</div></div>`;
+    const tr = rec ? rows.reduce((s, r) => s + (r.r || 0), 0) : null;
+    const tp = rows.reduce((s, r) => s + r.p, 0);
+    html += `<div class="comp-row total"><div class="comp-name">Fitness totale</div><div></div><div class="num">${nf(tr)}</div><div class="num">${nf(tp)}</div></div></div>`;
+    c.body.innerHTML = html;
+  }
+
+  c = card('c-comp-time', 'Come cambiano i componenti principali',
+    'Media della popolazione per generazione dei sei componenti più pesanti. Aiuta a capire cosa sta imparando la popolazione: per esempio più uccisioni, meno vite perse, meno inattività.');
+  const top6 = comps.map(k => ({ ...k, w: Math.abs(pop[k.key] || 0) })).sort((a, b) => b.w - a.w).slice(0, 6);
+  const cols = [C.val, C.record, C.bad, C.pop, C.top, C.faint];
+  const series = top6.map((k, i) => {
+    const roll = rolling(H.map(r => get(r, 'comp_pop.' + k.key)), 5);
+    return { name: k.label, color: cols[i], width: 2, points: H.map((r, j) => ({ x: r.gen, y: roll[j] })) };
+  });
+  lineChart(c.body, { height: 300, markers: mk, zero: true, series, empty: 'Ancora nessuna generazione.' });
+  legend(c.legend, series.map(s => ({ name: s.name, color: s.color })));
+  c.slot.innerHTML = '<span class="badge flat">media mobile 5 gen</span>';
+}
+
+function renderSpecies(H, D, C, mk) {
+  const dark = palette().dark;
+  let c = card('c-species', 'Dimensione delle specie',
+    'Ogni colore è una specie; l\'altezza è il numero di genomi. Le specie nascono quando compaiono reti abbastanza diverse e muoiono se non migliorano per troppe generazioni.',
+    'Passa sul grafico per vedere le specie più grandi a quella generazione.');
+  const ids = [];
+  const seen = new Set();
+  for (const r of H) for (const id of Object.keys(get(r, 'species.sizes') || {})) if (!seen.has(id)) { seen.add(id); ids.push(id); }
+  stackChart(c.body, {
+    height: 280, xs: H.map(r => r.gen), markers: mk, tipDec: 0, totalLabel: 'Popolazione', tipMax: 10,
+    layers: ids.map(id => ({ name: 'Specie ' + id, color: speciesColor(id, dark), values: H.map(r => get(r, 'species.sizes.' + id) || 0) })),
+  });
+  const last = H[H.length - 1];
+  c.slot.innerHTML = last ? `<span class="badge flat">${nf(get(last, 'species.n'))} specie · soglia ${nf(get(last, 'species.threshold'), 2)}</span>` : '';
+
+  c = card('c-species-table', 'Specie dell\'ultima generazione',
+    `“Senza migliorare” conta le generazioni dall'ultimo miglioramento della specie: a ${D.static.max_stagnation} viene eliminata, salvo le ${D.static.species_elitism} migliori.`);
+  const rows = get(D, 'snapshot.species_table') || [];
+  if (!rows.length) return noData(c.body, 'Compare alla fine della prima generazione.');
+  const maxStag = D.static.max_stagnation;
+  const protectedIds = new Set(rows.slice().sort((a, b) => (b.fit_mean ?? -Infinity) - (a.fit_mean ?? -Infinity)).slice(0, D.static.species_elitism).map(r => r.id));
+  let html = '<div class="table-wrap"><table><thead><tr><th class="l">Specie</th><th>Età</th><th>Genomi</th><th>Fitness media</th><th>Fitness migliore</th><th class="l">Senza migliorare</th><th class="l">Stato</th></tr></thead><tbody>';
+  for (const r of rows) {
+    const frac = Math.min(1, r.stag / maxStag);
+    const col = frac >= 0.8 ? C.bad : frac >= 0.5 ? C.warn : C.good;
+    const status = protectedIds.has(r.id) ? 'protetta' : r.stag >= maxStag - 3 ? '<span style="color:' + C.bad + '">a rischio</span>' : 'attiva';
+    html += `<tr><td class="l"><span class="swatch" style="background:${speciesColor(r.id, dark)}"></span>${r.id}</td><td>${nf(r.age)}</td><td>${nf(r.size)}</td><td>${nf(r.fit_mean)}</td><td>${nf(r.fit_max)}</td>
+      <td class="l"><span class="meter"><span style="width:${(frac * 100).toFixed(0)}%;background:${col}"></span></span>${nf(r.stag)}/${maxStag}</td><td class="l">${status}</td></tr>`;
+  }
+  c.body.innerHTML = html + '</tbody></table></div>';
+}
+
+function renderNets(H, D, C, mk) {
+  const box = $('#nets');
+  box.innerHTML = '';
+  const defs = [
+    { id: 'n-nodes', t: 'Nodi delle reti', how: 'Neuroni per rete (uscite comprese). NEAT parte da reti piccole e aggiunge nodi solo se servono.',
+      series: [{ name: 'Media', color: C.val, k: 'net.nodes_mean' }, { name: 'Massimo', color: C.faint, k: 'net.nodes_max', dash: '5 4' }] },
+    { id: 'n-conns', t: 'Connessioni attive', how: "Collegamenti attivi per rete. Una crescita lenta e costante è normale; un'esplosione senza miglioramenti indica reti gonfie.",
+      series: [{ name: 'Media', color: C.val, k: 'net.conns_mean' }, { name: 'Massimo', color: C.faint, k: 'net.conns_max', dash: '5 4' }] },
+    { id: 'n-imit', t: 'Bonus di imitazione', how: `Premio per la somiglianza con le partite umane migliori, oltre quella dovuta al caso (massimo ${D.static.imitation_max_bonus}, dalla generazione ${D.static.imitation_start_gen}).`,
+      series: [{ name: 'Media', color: C.top, k: 'imit.mean' }, { name: 'Massimo', color: C.faint, k: 'imit.max', dash: '5 4' }] },
+    { id: 'n-time', t: 'Durata di una generazione', how: 'Secondi per valutare e validare una generazione. Cresce quando i genomi sopravvivono più a lungo, perché le partite durano di più.', unit: ' s',
+      series: [{ name: 'Secondi', color: C.pop, k: 'secs' }] },
+  ];
+  for (const d of defs) {
+    newCard(box, d.id);
+    const c = card(d.id, d.t, d.how);
+    const series = d.series.map(s => ({ name: s.name, color: s.color, width: 2, dash: s.dash, points: pts(H, r => get(r, s.k)) }));
+    lineChart(c.body, { height: 160, ml: 44, yTicks: 3, zero: true, markers: mk, unit: d.unit, tipDec: 1, series });
+    legend(c.legend, series.map(s => ({ name: s.name, color: s.color, kind: s.dash ? 'dash' : '' })));
+  }
+}
+
+function renderTop(D, C) {
+  const snap = D.snapshot;
+  const c = card('c-top', 'Classifica dell\'ultima generazione',
+    `Fitness media sulle ${D.static.episodes_per_genome} partite della generazione (bonus di imitazione incluso). Uccisioni: proiettili / missili / bomba. I primi ${D.static.validation_top_k} vengono rigiocati sulle partite di validazione.`);
+  if (!snap || !snap.top_genomes) return noData(c.body, 'Compare alla fine della prima generazione.');
+  $('#top-sub').textContent = `Generazione ${nf(snap.gen)}: i 10 genomi con la fitness più alta (partite con seed ${(snap.seeds || []).join(', ')}).`;
+  const recKey = get(D, 'snapshot.record.key');
+  let html = '<div class="table-wrap"><table><thead><tr><th class="l">#</th><th class="l">Genoma</th><th>Specie</th><th>Fitness</th><th>di cui imitazione</th><th>Punti</th><th>Sopravvivenza</th><th>Livello</th><th>Uccisioni</th><th>Vite perse</th><th>Fermo</th><th>Missili lanciati</th><th>Nodi / conn.</th></tr></thead><tbody>';
+  for (const g of snap.top_genomes) {
+    html += `<tr class="${g.key === recKey ? 'hl' : ''}"><td class="l">${g.rank}</td><td class="l">${g.key}${g.key === recKey ? ' <span class="badge good">record</span>' : ''}</td>
+      <td>${g.species ?? '–'}</td><td><b>${nf(g.fitness)}</b></td><td>${nf(g.imitation, 1)}</td><td>${nf(g.score)}</td><td>${nf(g.surv)} s</td><td>${nf(g.level, 1)}</td>
+      <td>${nf(g.kills, 1)} / ${nf(g.missile_kills, 1)} / ${nf(g.bomb_kills, 1)}</td><td>${nf(g.lives_lost, 1)}</td><td>${nf(g.idle_pct)}%</td><td>${nf(g.missiles_fired, 1)}</td><td>${g.nodes} / ${g.conns}</td></tr>`;
+  }
+  c.body.innerHTML = html + '</tbody></table></div>';
+}
+
+function renderGuide(D) {
+  const s = D.static;
+  const g = [
+    ['Generazione', `Un ciclo dell'evoluzione: tutti i ${nf(s.pop_size)} genomi giocano, i migliori si riproducono (con mutazioni e incroci) e formano la generazione successiva. I ${s.elitism} migliori di ogni specie passano invariati.`],
+    ['Genoma e rete', 'Un genoma descrive una rete neurale: 52 valori letti dal gioco in ingresso (posizione, nemici, proiettili, power-up…), 5 comandi in uscita (movimento verticale e orizzontale, sparo, missile, bomba).'],
+    ['Fitness', 'Il punteggio con cui NEAT sceglie chi si riproduce: somma di premi e penalità (vedi la scomposizione). Non è lo score di gioco, anche se ne segue l\'andamento.'],
+    ['Partite di training', `Ogni generazione usa ${s.episodes_per_genome} partite nuove, uguali per tutti i genomi: il confronto tra genomi è equo, ma da una generazione all'altra la difficoltà cambia e i valori oscillano.`],
+    ['Validazione e record', `A fine generazione i ${s.validation_top_k} genomi con la fitness più alta giocano ${s.validation_seeds} partite fisse, intere e senza bonus. Se uno batte il record viene salvato in best_genome.pkl, che è anche il compagno in coop. È la misura più affidabile.`],
+    ['Migliori 10%', 'I genomi con la fitness più alta della generazione: mostrano dove sta arrivando la parte buona della popolazione, meno rumorosa del singolo massimo.'],
+    ['Specie', 'Gruppi di reti con struttura simile. Ogni genoma compete soprattutto con la sua specie: così una rete nuova, ancora poco allenata, non viene eliminata subito.'],
+    ['Soglia di compatibilità', 'Quanto due reti possono essere diverse e restare nella stessa specie. Il trainer la regola da solo: la abbassa se le specie sono 2 o meno, la alza se sono più di 20.'],
+    ['Stallo', `Generazioni da quando la fitness media di una specie ha migliorato il suo massimo. A ${s.max_stagnation} la specie viene eliminata, salvo le ${s.species_elitism} migliori.`],
+    ['Interruzione anticipata', `In training una partita finisce prima se la nave resta ferma per il ${nf(s.early_stop_idle_pct)}% del tempo o, dalla generazione ${s.early_stop_lives_gen}, dopo ${s.early_stop_lives} vite perse. La durata massima cresce da ${s.min_episode_s} a ${s.max_episode_s} s nelle prime 50 generazioni.`],
+    ['Imitazione', `Dalla generazione ${s.imitation_start_gen} ogni genoma riceve fino a ${s.imitation_max_bonus} punti se in situazioni registrate dal giocatore umano sceglie movimenti e sparo simili ai suoi, oltre quanto farebbe a caso.`],
+    ['Tendenza e media mobile', 'La media mobile fa la media delle ultime 10 generazioni per togliere le oscillazioni. Il badge di tendenza confronta le ultime 15 generazioni con le 15 precedenti e dice "stabile" quando la differenza è entro il rumore.'],
+    ['Versione della fitness', `Cambia quando cambiano formula, regole di gioco del training o partite di validazione (ora v${s.fitness_version}). I valori di versioni diverse non sono confrontabili: nei grafici il cambio è segnato da una linea tratteggiata.`],
+  ];
+  const params = [
+    ['Genomi per generazione', nf(s.pop_size)], ['Processi in parallelo', nf(s.workers)],
+    ['Partite per genoma', nf(s.episodes_per_genome)], ['Partite di validazione', nf(s.validation_seeds)],
+    ['Genomi validati per generazione', nf(s.validation_top_k)], ['Durata massima partita', `${s.min_episode_s} → ${s.max_episode_s} s`],
+    ['Eliminazione per stallo', `${s.max_stagnation} generazioni`], ['Specie protette', nf(s.species_elitism)],
+    ['Elitismo per specie', nf(s.elitism)], ['Versione della fitness', 'v' + s.fitness_version],
+  ];
+  $('#guide').innerHTML = `<details class="card" open><summary>Parametri del training</summary><div class="body"><dl class="params">${params.map(p => `<dt>${esc(p[0])}</dt><dd>${esc(p[1])}</dd>`).join('')}</dl></div></details>`
+    + g.map(([t, b]) => `<details class="card"><summary>${esc(t)}</summary><div class="body"><p>${esc(b)}</p></div></details>`).join('');
+}
+
+/* ───────── rendering complessivo ───────── */
+function renderAll() {
+  const D = S.data;
+  const hasData = D && D.history && D.history.length;
+  $('#empty').hidden = !!hasData;
+  $('#content').hidden = !hasData;
+  if (!hasData) return;
+  const C = palette();
+  const all = prepHistory(D);
+  const H = inRange(all);
+  const mk = markersFor(H);
+  renderVerdict(all, D);
+  renderKpis(all, H, D, C);
+  renderProgress(H, D, C, mk);
+  renderGame(H, D, C, mk);
+  renderBehaviour(H, D, C, mk);
+  renderComposition(all, H, D, C, mk);
+  renderSpecies(H, D, C, mk);
+  renderNets(H, D, C, mk);
+  renderTop(D, C);
+  renderGuide(D);
+  const first = all[0], last = all[all.length - 1];
+  $('#footer').textContent = `Storico: ${nf(all.length)} generazioni (dalla ${nf(first.gen)} alla ${nf(last.gen)}) in ai/training_history.jsonl · dati aggiornati alle ${clock(D.stamp)} · la pagina si aggiorna da sola ogni 3 secondi`;
+}
+
+/* ───────── caricamento dei dati (tag script: funziona da file://) ───────── */
+function loadScript(name, done) {
+  const s = document.createElement('script');
+  s.src = name + '?t=' + Date.now();
+  s.onload = () => { s.remove(); done(true); };
+  s.onerror = () => { s.remove(); done(false); };
+  document.head.appendChild(s);
+}
+function loadData() {
+  if (S.dataLoading) return;
+  S.dataLoading = true;
+  loadScript('data.js', ok => {
+    S.dataLoading = false;
+    if (ok && window.YS_DATA) {
+      S.data = window.YS_DATA;
+      S.stamp = S.data.stamp;
+      renderAll();
+    } else if (!S.data) renderAll();
+  });
+}
+function poll() {
+  loadScript('live.js', ok => {
+    S.live = ok ? window.YS_LIVE : S.live;
+    renderStatus();
+    if (!S.data || (S.live && S.live.data_stamp && S.live.data_stamp !== S.stamp) || !ok) loadData();
+  });
+}
+
+/* ───────── controlli ───────── */
+function applyRange(r) {
+  S.range = r;
+  pref('range', r);
+  document.querySelectorAll('#range button').forEach(b => b.classList.toggle('on', b.dataset.r === r));
+}
+function applyTheme(t) {
+  if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  $('#theme').textContent = 'Tema: ' + (t === 'light' ? 'chiaro' : t === 'dark' ? 'scuro' : 'auto');
+  pref('theme', t || 'auto');
+}
+document.querySelectorAll('#range button').forEach(b => b.addEventListener('click', () => { applyRange(b.dataset.r); renderAll(); }));
+$('#theme').addEventListener('click', () => {
+  const cur = pref('theme') || 'auto';
+  applyTheme(cur === 'auto' ? 'light' : cur === 'light' ? 'dark' : 'auto');
+  renderAll();
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => renderAll());
+let resizeTimer = null;
+addEventListener('resize', () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(renderAll, 150); });
+
+applyRange(['50', '200', 'all'].includes(pref('range')) ? pref('range') : '200');
+applyTheme(pref('theme') || 'auto');
+renderStatus();
+poll();
+setInterval(poll, 3000);
+</script>
+</body>
+</html>

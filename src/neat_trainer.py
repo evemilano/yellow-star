@@ -24,6 +24,7 @@ import neat
 import pygame
 from settings import SCREEN_WIDTH, SCREEN_HEIGHT, FPS
 from src.game_env import GameEnv
+from src.training_dashboard import TrainingDashboard
 
 AI_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ai")
 CONFIG_PATH = os.path.join(AI_DIR, "neat_config.txt")
@@ -33,6 +34,11 @@ BEST_GENOME_META_PATH = os.path.join(AI_DIR, "best_genome_meta.json")
 CHECKPOINT_PREFIX = os.path.join(AI_DIR, "neat-checkpoint-")
 MAX_CHECKPOINTS = 2  # mantieni solo gli ultimi N checkpoint
 SESSIONS_DIR = os.path.join(AI_DIR, "human_sessions")
+# Storico per generazione (stato del training, versionato) e cartella della
+# dashboard HTML (index.html versionato, data.js e live.js generati)
+HISTORY_PATH = os.path.join(AI_DIR, "training_history.jsonl")
+DASHBOARD_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dashboard")
+DASHBOARD_AUTO_OPEN = True  # apre la dashboard nel browser all'avvio del training
 
 # Durate in secondi di gioco, convertite in frame con settings.FPS (GameEnv
 # avanza di 1000/FPS ms a ogni step)
@@ -78,6 +84,46 @@ FITNESS_VERSION = 3
 # e' il genoma con la media piu' alta, se batte il record
 VALIDATION_TOP_K = 5
 VALIDATION_SEEDS = tuple(range(10 ** 9, 10 ** 9 + 10))  # fuori dalla serie del training
+
+
+# Componenti di _compute_fitness come li spiega la dashboard: tenerli allineati
+# ai pesi qui sotto. (chiave, nome, peso, descrizione)
+FITNESS_COMPONENTS = (
+    ('comp_kills', "Uccisioni con i proiettili", "+50 per nemico",
+     "Nemici distrutti dai proiettili."),
+    ('comp_missile_kills', "Uccisioni con i missili", "+50 per nemico",
+     "Nemici distrutti dai missili a ricerca."),
+    ('comp_bomb_kills', "Uccisioni con la bomba", "+50 per nemico",
+     "Nemici cancellati da una bomba."),
+    ('comp_accuracy', "Precisione", "+10 × precisione × uccisioni",
+     "Quota di raffiche andate a segno, moltiplicata per le uccisioni con i proiettili."),
+    ('comp_frames', "Sopravvivenza", "+1,5 al secondo",
+     "Secondi di gioco prima della fine dell'episodio."),
+    ('comp_lives', "Vite perse", "−200 per vita",
+     "Ogni vita persa."),
+    ('comp_level', "Livello raggiunto", "+50 × livello²",
+     "Il livello sale con lo score: premia la progressione nel gioco."),
+    ('comp_powerups', "Potenziamenti raccolti", "+50 ciascuno",
+     "Power-up di arma, motore o scudo raccolti."),
+    ('comp_missiles', "Missili raccolti", "+30 ciascuno",
+     "Power-up dei missili raccolti."),
+    ('comp_upgrades', "Livelli di potenziamento", "+20 per livello",
+     "Somma dei livelli di arma, motore e scudo raggiunti."),
+    ('comp_shield', "Colpi allo scudo", "−15 per colpo, −120 se si rompe",
+     "Colpi assorbiti dallo scudo e scudi distrutti."),
+    ('comp_idle', "Inattività", "−15 al secondo",
+     "Secondi in cui la nave non si sposta, anche se spinge contro un bordo."),
+    ('comp_dodges', "Schivate", "+5 ciascuna",
+     "Nemici o asteroidi passati entro 60 px e usciti senza colpire."),
+    ('comp_near_misses', "Passaggi ravvicinati", "+3 ciascuno",
+     "Minacce arrivate entro 60 px dalla nave."),
+    ('comp_pu_approach', "Avvicinamento ai power-up", "+3 al secondo netto",
+     "Saldo dei secondi passati ad avvicinarsi al power-up più vicino (mai negativo)."),
+    ('comp_shoot_penalty', "Raffiche sparate", "−0,01 per raffica",
+     "Piccolo costo per ogni raffica, contro lo sparo continuo inutile."),
+    ('comp_imitation', "Imitazione del giocatore", f"fino a +{IMITATION_MAX_BONUS}",
+     f"Somiglianza con le partite umane migliori oltre il caso (dalla generazione {IMITATION_START_GEN})."),
+)
 
 
 def _compute_fitness(env):
@@ -142,6 +188,8 @@ def _compute_fitness(env):
         'dodges': env.dodges,
         'accuracy': env.shots_hit / max(1, env.shots_fired),
         'near_misses': env.near_misses,
+        'missiles_fired': env.missiles_fired,
+        'bombs_used': env.bombs_used,
         **components,
     }
 
@@ -155,6 +203,7 @@ def _empty_env_stats():
         'powerups': 0, 'missiles': 0, 'upgrades': 0, 'idle_frames': 0,
         'enemies_killed': 0, 'missile_kills': 0, 'bomb_kills': 0,
         'dodges': 0, 'accuracy': 0, 'near_misses': 0,
+        'missiles_fired': 0, 'bombs_used': 0,
     }
     for key in ('comp_kills', 'comp_missile_kills', 'comp_bomb_kills',
                 'comp_dodges', 'comp_accuracy', 'comp_frames', 'comp_lives',
@@ -169,6 +218,74 @@ def _mean_stats(stats_list):
     """Media chiave per chiave delle env_stats di piu' episodi."""
     n = len(stats_list)
     return {k: sum(s[k] for s in stats_list) / n for k in stats_list[0]}
+
+
+def _game_stats(s):
+    """Statistiche di gioco leggibili da un dict env_stats (anche medio)."""
+    frames = s.get('frame_count', 0)
+    return {
+        'score': s.get('score', 0),
+        'surv': frames / FPS,
+        'level': s.get('level', 1),
+        'lives_lost': s.get('lives_lost', 0),
+        'kills': s.get('enemies_killed', 0),
+        'missile_kills': s.get('missile_kills', 0),
+        'bomb_kills': s.get('bomb_kills', 0),
+        'missiles_fired': s.get('missiles_fired', 0),
+        'missiles': s.get('missiles', 0),
+        'bombs_used': s.get('bombs_used', 0),
+        'powerups': s.get('powerups', 0),
+        'upgrades': s.get('upgrades', 0),
+        'idle_pct': s.get('idle_frames', 0) / frames * 100 if frames else 0.0,
+        'accuracy': s.get('accuracy', 0) * 100,
+        'near_misses': s.get('near_misses', 0),
+        'dodges': s.get('dodges', 0),
+    }
+
+
+def _mean_dicts(dicts):
+    """Media chiave per chiave di dict con le stesse chiavi."""
+    n = len(dicts)
+    return {k: sum(d[k] for d in dicts) / n for k in dicts[0]} if n else {}
+
+
+def _summary(values):
+    """Media, mediana, percentili 10/90, minimo, massimo e deviazione standard."""
+    v = sorted(values)
+    n = len(v)
+    if not n:
+        return None
+    mean = sum(v) / n
+
+    def q(p):
+        i = (n - 1) * p
+        lo = int(i)
+        hi = min(lo + 1, n - 1)
+        return v[lo] + (v[hi] - v[lo]) * (i - lo)
+
+    sd = (sum((x - mean) ** 2 for x in v) / (n - 1)) ** 0.5 if n > 1 else 0.0
+    return {'mean': mean, 'median': q(0.5), 'p10': q(0.1), 'p90': q(0.9),
+            'min': v[0], 'max': v[-1], 'sd': sd}
+
+
+def _trend(values, k=15):
+    """Confronta le ultime k generazioni con le k precedenti.
+
+    Ritorna (z, variazione %) o None con meno di 8 valori; |z| >= 2 indica
+    una differenza oltre il rumore tra generazioni.
+    """
+    v = [x for x in values if x is not None]
+    if len(v) < 8:
+        return None
+    k = min(k, len(v) // 2)
+    a, b = v[-2 * k:-k], v[-k:]
+    ma, mb = sum(a) / k, sum(b) / k
+    va = sum((x - ma) ** 2 for x in a) / (k - 1)
+    vb = sum((x - mb) ** 2 for x in b) / (k - 1)
+    se = ((va + vb) / k) ** 0.5
+    z = (mb - ma) / se if se > 0 else 0.0
+    pct = (mb - ma) / abs(ma) * 100 if ma else 0.0
+    return z, pct
 
 
 def _generation_seeds(generation):
@@ -519,52 +636,44 @@ class NeatTrainer:
         self._headless = False
         self._font = None
         self._font_small = None
-        self._font_big = None
-        self._font_section = None
+        self._fonts = None
         # Riferimenti NEAT (set in train())
         self._population = None
         self._stats_reporter = None
         self._checkpointer = None
-        # Statistiche per schermata headless
-        self._last_gen_stats = None
-        self._current_gen_fitnesses = []
+        # Dashboard HTML (storico, dettaglio dell'ultima generazione, stato live)
+        self._dash = None
         self._training_start_time = None
-        self._gen_total = 0             # genomi della generazione corrente
-        self._genomes_evaluated = 0     # genomi valutati in questa sessione
-        # Storico generazioni
-        self._fitness_history = []       # list of (avg, best, stdev)
-        self._species_count_history = []
-        self._gen_times = []
         self._gen_start_time = None
-        # Metriche GameEnv aggregate per gen corrente
-        self._current_gen_scores = []
-        self._current_gen_levels = []
-        self._current_gen_frames = []
-        self._current_gen_lives_lost = []
-        self._current_gen_powerups = []
-        self._current_gen_missiles = []
-        self._current_gen_upgrades = []
-        self._current_gen_idle_frames = []
-        # Scomposizione fitness: genoma record (medie sulla suite di
-        # validazione) e genomi della gen corrente (stesso ordine di
-        # _current_gen_fitnesses)
-        self._best_genome_components = None
-        self._current_gen_fitness_components = []
+        self._gen_total = 0             # genomi della generazione corrente
+        self._gen_rows = []             # genomi valutati: genoma, fitness, env_stats
+        self._progress = ('avvio', 0, 0)  # fase, completati, totale
         self._new_record_this_gen = False
-        # Validazione: cache per genome.key (media, componenti medi, fitness
+        # Record: chiave, valore, statistiche e fitness per seed del genoma in
+        # best_genome.pkl; record a inizio sessione per il delta di sessione
+        self._record_info = None
+        self._session_start_record = -math.inf
+        # Validazione: cache per genome.key (media, statistiche medie, fitness
         # per seed), valida per tutta la sessione (suite e fitness non
-        # cambiano), e progresso
+        # cambiano), e migliore validato dell'ultima generazione (key, media)
         self._val_cache = {}
-        self._last_validation = None    # (key, media) del migliore della gen
-        self._validation_progress = None
+        self._last_validation = None
         self._pool = None
 
     def _init_fonts(self):
         if self._font is None:
+            # Overlay del training visuale
             self._font = pygame.font.Font(None, 32)
             self._font_small = pygame.font.Font(None, 24)
-            self._font_big = pygame.font.Font(None, 56)
-            self._font_section = pygame.font.Font(None, 28)
+            # Schermata del training headless
+            name = 'segoeui,arial'
+            self._fonts = {
+                'title': pygame.font.SysFont(name, 34, bold=True),
+                'kpi': pygame.font.SysFont(name, 38, bold=True),
+                'body': pygame.font.SysFont(name, 20),
+                'label': pygame.font.SysFont(name, 17, bold=True),
+                'small': pygame.font.SysFont(name, 16),
+            }
 
     def train(self, generations=99999, headless=False):
         """Avvia o riprende il training NEAT.
@@ -623,6 +732,14 @@ class NeatTrainer:
         self._population = p
         self._stats_reporter = stats
 
+        # Dashboard HTML: storico (anche delle sessioni precedenti) e stato live
+        self._dash = TrainingDashboard(self._dashboard_static(p.config),
+                                       HISTORY_PATH, DASHBOARD_DIR)
+        self._dash.publish()
+        self._set_progress('avvio', force=True)
+        if DASHBOARD_AUTO_OPEN:
+            self._dash.open()
+
         # Sessioni umane per l'imitation bonus: caricate prima del Pool,
         # perche' i campioni vengono passati ai worker con initargs
         self._load_imitation_samples()
@@ -638,6 +755,7 @@ class NeatTrainer:
         try:
             # Record di validazione di best_genome.pkl (sidecar o rivalutazione)
             self._init_validation_record(p.config)
+            self._session_start_record = self.best_fitness
             p.run(self._eval_genomes, generations)
         except _TrainingInterrupted:
             print("\nTraining interrotto dall'utente.")
@@ -650,6 +768,7 @@ class NeatTrainer:
                 self._pool.terminate()
                 self._pool.join()
                 self._pool = None
+            self._set_progress('fermo', force=True)
 
         # Il miglior genoma e' gia' salvato incrementalmente in _eval_genomes
         if self.best_genome and self.best_fitness > -math.inf:
@@ -702,23 +821,13 @@ class NeatTrainer:
 
         total = len(genomes)
         self._gen_total = total
+        self._gen_rows = []
         render = self.screen is not None and not self._headless
-
-        # Reset liste per gen corrente
-        self._current_gen_fitnesses = []
-        self._current_gen_scores = []
-        self._current_gen_levels = []
-        self._current_gen_frames = []
-        self._current_gen_lives_lost = []
-        self._current_gen_powerups = []
-        self._current_gen_missiles = []
-        self._current_gen_upgrades = []
-        self._current_gen_idle_frames = []
-        self._current_gen_fitness_components = []
         game_fitness = {}  # idx -> fitness di gioco (senza imitation)
 
         max_frames = self._get_max_frames()
         seeds = _generation_seeds(self.generation)
+        self._set_progress('valutazione', 0, total, force=True)
 
         if self._headless:
             # ── Valutazione PARALLELA (headless, pool persistente) ──
@@ -739,17 +848,12 @@ class NeatTrainer:
                 self._collect_stats(genome, env_stats, imitation_bonus)
 
                 completed += 1
-                # Aggiorna dashboard durante la valutazione
-                if self.screen and completed % 5 == 0:
-                    self._draw_stats_screen(completed, total, config)
+                self._set_progress('valutazione', completed, total)
+                # Aggiorna la schermata durante la valutazione
+                if self.screen and (completed % 5 == 0 or completed == total):
+                    self._draw_stats_screen()
                     pygame.display.flip()
                     self._poll_interrupt()
-
-            # Aggiorna schermata finale
-            if self.screen:
-                self._draw_stats_screen(total, total, config)
-                pygame.display.flip()
-                self._poll_interrupt()
         else:
             # ── Valutazione SERIALE (con rendering) ──
             for idx, (genome_id, genome) in enumerate(genomes):
@@ -759,40 +863,16 @@ class NeatTrainer:
                 genome.fitness = fitness
                 game_fitness[idx] = fitness
                 self._collect_stats(genome, env_stats)
-
-        best_fitness_in_gen = max(self._current_gen_fitnesses) if self._current_gen_fitnesses else 0.0
+                self._set_progress('valutazione', idx + 1, total)
 
         # Validazione dei migliori: salva best_genome.pkl se batte il record
         self._new_record_this_gen = self._validate_top_genomes(genomes, game_fitness, config)
 
-        # Statistiche fine generazione
-        n = max(1, len(self._current_gen_fitnesses))
-        avg_fit = sum(self._current_gen_fitnesses) / n
-        stdev_fit = 0.0
-        if n > 1:
-            variance = sum((f - avg_fit) ** 2 for f in self._current_gen_fitnesses) / (n - 1)
-            stdev_fit = variance ** 0.5
-
+        # Storico e dettaglio della generazione per la dashboard
         gen_time = time.time() - self._gen_start_time
-        self._gen_times.append(gen_time)
-        self._fitness_history.append((avg_fit, best_fitness_in_gen, stdev_fit))
-
-        # Conteggio specie
-        num_species = 0
-        if self._population and hasattr(self._population, 'species'):
-            num_species = len(self._population.species.species)
-        self._species_count_history.append(num_species)
-
-        self._last_gen_stats = {
-            'avg_fitness': avg_fit,
-            'best_fitness': best_fitness_in_gen,
-            'stdev': stdev_fit,
-            'avg_score': sum(self._current_gen_scores) / n,
-            'avg_level': sum(self._current_gen_levels) / n,
-            'avg_frames': sum(self._current_gen_frames) / n,
-            'avg_lives_lost': sum(self._current_gen_lives_lost) / n,
-            'gen_time': gen_time,
-        }
+        if self._dash is not None and self._gen_rows:
+            record, snapshot = self._generation_report(gen_time, max_frames, seeds)
+            self._dash.record_generation(record, snapshot)
 
         self.generation += 1
 
@@ -801,7 +881,7 @@ class NeatTrainer:
 
         # In headless: aggiorna schermata fine generazione
         if self._headless and self.screen:
-            self._draw_stats_screen(total, total, config)
+            self._draw_stats_screen()
             pygame.display.flip()
 
     def _poll_interrupt(self):
@@ -811,6 +891,8 @@ class NeatTrainer:
                 raise _TrainingInterrupted()
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                 raise _TrainingInterrupted()
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_d:
+                self._open_dashboard()
 
     # ── Validazione e persistenza del best ──
 
@@ -829,7 +911,7 @@ class NeatTrainer:
         if todo:
             self._val_cache.update(self._run_validation(todo, config))
         best = max(candidates, key=lambda g: self._val_cache[g.key][0])
-        mean, comps, per_seed = self._val_cache[best.key]
+        mean, stats, per_seed = self._val_cache[best.key]
         self._last_validation = (best.key, mean)
         print(f"  [Validazione] top-{len(candidates)} ({len(todo)} nuovi): migliore genoma "
               f"{best.key}, media {mean:.1f} su {len(VALIDATION_SEEDS)} seed "
@@ -838,17 +920,18 @@ class NeatTrainer:
             return False
         self.best_fitness = mean
         self.best_genome = best
-        self._best_genome_components = comps
-        self._save_best_genome(best, mean, per_seed)
+        self._record_info = self._make_record_info(best, mean, stats, per_seed, self.generation)
+        self._save_best_genome(best, mean, per_seed, stats)
         return True
 
-    def _run_validation(self, genomes, config):
+    def _run_validation(self, genomes, config, phase='validazione'):
         """Gioca la suite di validazione per ogni genoma.
 
         In headless usa il Pool (un task per genoma e seed), nel visuale gira
         nel processo principale senza rendering. Ritorna {key: (media,
-        componenti medi, [fitness per seed in ordine di seed])}; media -inf se
-        un episodio fallisce (genoma incompatibile).
+        env_stats medi, [fitness per seed in ordine di seed])}; media -inf se
+        un episodio fallisce (genoma incompatibile). `phase` e' la fase
+        mostrata da schermata e dashboard durante la suite.
         """
         max_frames = MAX_FRAMES_PER_EPISODE
         tasks = [(g.key, g, config, seed, max_frames) for g in genomes for seed in VALIDATION_SEEDS]
@@ -858,20 +941,18 @@ class NeatTrainer:
         else:
             results = (_validation_worker(t) for t in tasks)
         done = 0
-        try:
-            for key, seed, fitness, env_stats in results:
-                per_key[key][seed] = (fitness, env_stats)
-                done += 1
-                self._validation_progress = (done, len(tasks))
-                if self.screen is not None:
-                    if self._headless:
-                        self._draw_stats_screen(self._gen_total, self._gen_total, config)
-                    else:
-                        self._draw_validation_overlay(done, len(tasks))
-                    pygame.display.flip()
-                    self._poll_interrupt()
-        finally:
-            self._validation_progress = None
+        self._set_progress(phase, 0, len(tasks), force=True)
+        for key, seed, fitness, env_stats in results:
+            per_key[key][seed] = (fitness, env_stats)
+            done += 1
+            self._set_progress(phase, done, len(tasks))
+            if self.screen is not None:
+                if self._headless:
+                    self._draw_stats_screen()
+                else:
+                    self._draw_validation_overlay(done, len(tasks))
+                pygame.display.flip()
+                self._poll_interrupt()
 
         out = {}
         for key, by_seed in per_key.items():
@@ -907,19 +988,23 @@ class NeatTrainer:
         meta = self._read_best_meta()
         if meta is not None:
             self.best_fitness = float(meta['validation_mean'])
+            self._record_info = self._make_record_info(
+                self.best_genome, self.best_fitness, meta.get('validation_stats'),
+                meta.get('validation_fitness'), meta.get('generation'))
             print(f"Record di validazione: {self.best_fitness:.1f} ({BEST_GENOME_META_PATH})")
             return
 
         print("Rivalutazione di best_genome.pkl sulla suite di validazione "
               f"({len(VALIDATION_SEEDS)} seed, fitness v{FITNESS_VERSION})...")
-        mean, comps, per_seed = self._run_validation([self.best_genome], config)[self.best_genome.key]
+        mean, stats, per_seed = self._run_validation(
+            [self.best_genome], config, phase='rivalutazione')[self.best_genome.key]
         if mean == -math.inf:
             print("  best_genome.pkl non valutabile: record azzerato")
             return
         self.best_fitness = mean
-        self._best_genome_components = comps
+        self._record_info = self._make_record_info(self.best_genome, mean, stats, per_seed, None)
         print(f"  Record di validazione: {mean:.1f}")
-        self._write_best_meta(self.best_genome, mean, per_seed)
+        self._write_best_meta(self.best_genome, mean, per_seed, stats)
 
     def _read_best_meta(self):
         """Sidecar del best se valido per il genoma e la suite correnti, altrimenti None."""
@@ -936,8 +1021,12 @@ class NeatTrainer:
             return None
         return meta
 
-    def _write_best_meta(self, genome, mean, per_seed):
-        """Scrive il sidecar del best (JSON, atomico: .tmp + os.replace)."""
+    def _write_best_meta(self, genome, mean, per_seed, stats=None):
+        """Scrive il sidecar del best (JSON, atomico: .tmp + os.replace).
+
+        `stats` (env_stats medi della suite) servono alla dashboard per la
+        scomposizione della fitness del record anche dopo un riavvio.
+        """
         meta = {
             'fitness_version': FITNESS_VERSION,
             'validation_mean': mean,
@@ -948,20 +1037,23 @@ class NeatTrainer:
             'generation': self.generation,
             'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
         }
+        if stats:
+            meta['validation_stats'] = {k: v for k, v in stats.items()
+                                        if isinstance(v, (int, float))}
         os.makedirs(os.path.dirname(BEST_GENOME_META_PATH), exist_ok=True)
         tmp = BEST_GENOME_META_PATH + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(meta, f, indent=1)
         os.replace(tmp, BEST_GENOME_META_PATH)
 
-    def _save_best_genome(self, genome, mean, per_seed):
+    def _save_best_genome(self, genome, mean, per_seed, stats=None):
         """Salva best_genome.pkl (stesso formato: il genoma pickled) e il sidecar."""
         os.makedirs(AI_DIR, exist_ok=True)
         tmp = BEST_GENOME_PATH + '.tmp'
         with open(tmp, 'wb') as f:
             pickle.dump(genome, f)
         os.replace(tmp, BEST_GENOME_PATH)
-        self._write_best_meta(genome, mean, per_seed)
+        self._write_best_meta(genome, mean, per_seed, stats)
 
     def _get_max_frames(self):
         """Frame massimi adattivi: piu' generazioni = piu' tempo concesso."""
@@ -982,18 +1074,11 @@ class NeatTrainer:
                 imitation_bonus = self._imitation_bonus(genome, self.config)
             bonus = imitation_bonus
             genome.fitness += bonus
-        env_stats = dict(env_stats, comp_imitation=bonus)
-        self._genomes_evaluated += 1
-        self._current_gen_fitnesses.append(genome.fitness)
-        self._current_gen_scores.append(env_stats['score'])
-        self._current_gen_levels.append(env_stats['level'])
-        self._current_gen_frames.append(env_stats['frame_count'])
-        self._current_gen_lives_lost.append(env_stats['lives_lost'])
-        self._current_gen_powerups.append(env_stats['powerups'])
-        self._current_gen_missiles.append(env_stats['missiles'])
-        self._current_gen_upgrades.append(env_stats['upgrades'])
-        self._current_gen_idle_frames.append(env_stats['idle_frames'])
-        self._current_gen_fitness_components.append(env_stats)
+        self._gen_rows.append({
+            'genome': genome,
+            'fitness': genome.fitness,
+            'stats': dict(env_stats, comp_imitation=bonus),
+        })
 
     def _eval_single(self, genome, config, genome_num=0, total=0, render=False,
                      seeds=None, max_frames=None):
@@ -1023,6 +1108,8 @@ class NeatTrainer:
                             if event.key == pygame.K_ESCAPE:
                                 env.close()
                                 raise _TrainingInterrupted()
+                            if event.key == pygame.K_d:
+                                self._open_dashboard()
 
                 output = act(obs)
                 actions = self._decode_actions(output)
@@ -1106,7 +1193,7 @@ class NeatTrainer:
             f"Vite: {env.player.lives} | "
             f"Livello: {env.level_manager.level} | "
             f"Frame: {frame} | "
-            f"ESC=interrompi",
+            f"ESC=interrompi | D=dashboard",
             True, (180, 220, 180)
         )
         self.screen.blit(bottom_text, (10, SCREEN_HEIGHT - 26))
@@ -1122,422 +1209,404 @@ class NeatTrainer:
         self.screen.blit(text, text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)))
 
     def _format_record(self):
-        """Record di validazione per HUD e dashboard ('n/d' se non ancora fissato)."""
-        return "n/d" if self.best_fitness == -math.inf else f"{self.best_fitness:.0f}"
+        """Record di validazione per HUD e schermata ('n/d' se non ancora fissato)."""
+        return self._fmt(self.best_fitness)
 
-    # ── Dashboard headless: orchestratore ──
+    # ── Dati per la dashboard HTML ──
 
-    def _draw_stats_screen(self, genome_num, total, config=None):
-        """Disegna la dashboard completa per il training headless."""
-        self.screen.fill((10, 10, 30))
+    def _dashboard_static(self, config):
+        """Parametri del training mostrati e spiegati dalla dashboard."""
+        stag = config.stagnation_config
+        return {
+            'fitness_version': FITNESS_VERSION,
+            'headless': self._headless,
+            'pop_size': config.pop_size,
+            'workers': max(1, multiprocessing.cpu_count() - 1) if self._headless else 1,
+            'episodes_per_genome': EPISODES_PER_GENOME,
+            'validation_seeds': len(VALIDATION_SEEDS),
+            'validation_top_k': VALIDATION_TOP_K,
+            'max_episode_s': MAX_EPISODE_SECONDS,
+            'min_episode_s': MIN_EPISODE_SECONDS,
+            'early_stop_idle_pct': EARLY_STOP_IDLE_RATIO * 100,
+            'early_stop_lives': EARLY_STOP_MAX_LIVES_LOST,
+            'early_stop_lives_gen': EARLY_STOP_LIVES_GEN,
+            'imitation_start_gen': IMITATION_START_GEN,
+            'imitation_max_bonus': IMITATION_MAX_BONUS,
+            'max_stagnation': stag.max_stagnation,
+            'species_elitism': stag.species_elitism,
+            'elitism': config.reproduction_config.elitism,
+            'components': [
+                {'key': k, 'label': label, 'weight': weight, 'desc': desc}
+                for k, label, weight, desc in FITNESS_COMPONENTS
+            ],
+        }
 
-        # Header
-        self._draw_header(config)
+    def _set_progress(self, phase, done=0, total=0, force=False):
+        """Fase e avanzamento correnti, per la schermata e per live.js.
 
-        # Colonna sinistra (x=20..620)
-        lx = 20
-        ly = 80
-        ly = self._draw_section_progress(lx, ly, genome_num, total, config)
-        ly = self._draw_section_fitness(lx, ly)
-        ly = self._draw_section_behavior(lx, ly)
-        self._draw_section_efficiency(lx, ly, genome_num, config)
+        Fasi: avvio, rivalutazione (record all'avvio), valutazione,
+        validazione, fermo.
+        """
+        self._progress = (phase, done, total)
+        if self._dash is None:
+            return
+        self._dash.update_live({
+            'phase': phase,
+            'done': done,
+            'total': total,
+            'gen': self.generation,
+            'record': self.best_fitness,
+            'session_start': int(self._training_start_time * 1000) if self._training_start_time else None,
+            'gen_start': int(self._gen_start_time * 1000) if self._gen_start_time else None,
+        }, force=force)
 
-        # Colonna destra (x=650..1260)
-        rx = 650
-        ry = 80
-        ry = self._draw_section_breakdown(rx, ry)
-        self._draw_section_species(rx, ry)
+    def _open_dashboard(self):
+        if self._dash is not None:
+            self._dash.open()
 
-        # Footer: barra progresso + hint
-        self._draw_footer(genome_num, total)
+    @staticmethod
+    def _make_record_info(genome, mean, stats, per_seed, generation):
+        """Riepilogo del genoma record per la dashboard (stats = env_stats medi)."""
+        info = {
+            'key': getattr(genome, 'key', None),
+            'value': mean,
+            'generation': generation,
+            'per_seed': per_seed,
+            'seeds': list(VALIDATION_SEEDS),
+        }
+        if stats:
+            info['stats'] = _game_stats(stats)
+            info['comp'] = {k: stats.get(k, 0) for k, *_ in FITNESS_COMPONENTS}
+        return info
 
-    # ── Header ──
+    def _validation_summary(self):
+        """Migliore validato della generazione: media, dispersione, statistiche."""
+        if not self._last_validation:
+            return None
+        key, mean = self._last_validation
+        _, stats, per_seed = self._val_cache.get(key, (None, None, None))
+        out = {'key': key, 'mean': mean}
+        if per_seed and all(f is not None for f in per_seed):
+            out['sd'] = _summary(per_seed)['sd']
+        if stats:
+            out.update(_game_stats(stats))
+        return out
 
-    def _draw_header(self, config=None):
-        pop = config.pop_size if config else "?"
-        elapsed = self._format_time(time.time() - self._training_start_time) if self._training_start_time else "0s"
+    def _species_rows(self):
+        """Specie della generazione valutata, ordinate per fitness migliore."""
+        rows = []
+        if self._population is None:
+            return rows
+        for sid, sp in self._population.species.species.items():
+            members = [g for g in sp.members.values() if g.fitness is not None]
+            fits = [g.fitness for g in members]
+            best = max(members, key=lambda g: g.fitness) if members else None
+            rows.append({
+                'id': sid,
+                'age': self.generation - sp.created,
+                'size': len(sp.members),
+                'fit_mean': sum(fits) / len(fits) if fits else None,
+                'fit_max': best.fitness if best else None,
+                'best_key': best.key if best else None,
+                'stag': self.generation - sp.last_improved,
+            })
+        rows.sort(key=lambda r: -math.inf if r['fit_max'] is None else r['fit_max'], reverse=True)
+        return rows
 
-        title = self._font_big.render("YELLOW STAR - TRAINING AI", True, (255, 255, 0))
-        self.screen.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 22)))
+    def _generation_report(self, gen_time, max_frames, seeds):
+        """Riga dello storico e dettaglio della generazione appena valutata."""
+        rows = self._gen_rows
+        genome_to_species = self._population.species.genome_to_species if self._population else {}
+        ranked = sorted(rows, key=lambda r: r['fitness'], reverse=True)
+        top = ranked[:max(1, len(ranked) // 10)]
+        comp_keys = [k for k, *_ in FITNESS_COMPONENTS]
 
-        sub = self._font_small.render(
-            f"Gen {self.generation + 1}  |  Pop {pop}  |  {elapsed}",
-            True, (150, 150, 200)
-        )
-        self.screen.blit(sub, sub.get_rect(center=(SCREEN_WIDTH // 2, 50)))
+        def net_size(genome):
+            return len(genome.nodes), sum(1 for c in genome.connections.values() if c.enabled)
 
-        pygame.draw.line(self.screen, (60, 60, 100), (20, 65), (SCREEN_WIDTH - 20, 65), 1)
+        sizes = [net_size(r['genome']) for r in rows]
+        species = self._species_rows()
+        best = ranked[0]
+        record = {
+            'gen': self.generation,
+            'ts': time.time(),
+            'fv': FITNESS_VERSION,
+            'secs': gen_time,
+            'pop': len(rows),
+            'max_s': max_frames / FPS,
+            'fit': _summary([r['fitness'] for r in rows]),
+            'imit': _summary([r['stats']['comp_imitation'] for r in rows]),
+            'pop_stats': _mean_dicts([_game_stats(r['stats']) for r in rows]),
+            'top_stats': _mean_dicts([_game_stats(r['stats']) for r in top]),
+            'comp_pop': {k: sum(r['stats'].get(k, 0) for r in rows) / len(rows) for k in comp_keys},
+            'gen_best': dict(_game_stats(best['stats']), key=best['genome'].key,
+                             fitness=best['fitness'],
+                             species=genome_to_species.get(best['genome'].key)),
+            'val': self._validation_summary(),
+            'record': self.best_fitness,
+            'record_key': getattr(self.best_genome, 'key', None),
+            'new_record': self._new_record_this_gen,
+            'record_stats': (self._record_info or {}).get('stats'),
+            'species': {
+                'n': len(species),
+                'threshold': self.config.species_set_config.compatibility_threshold,
+                'max_stag': max((r['stag'] for r in species), default=0),
+                'sizes': {str(r['id']): r['size'] for r in species},
+            },
+            'net': {
+                'nodes_mean': sum(n for n, _ in sizes) / len(sizes),
+                'conns_mean': sum(c for _, c in sizes) / len(sizes),
+                'nodes_max': max(n for n, _ in sizes),
+                'conns_max': max(c for _, c in sizes),
+            },
+        }
 
-    # ── Sezione A: Progresso ──
+        top_genomes = []
+        for rank, r in enumerate(ranked[:10], 1):
+            nodes, conns = net_size(r['genome'])
+            top_genomes.append(dict(
+                _game_stats(r['stats']), rank=rank, key=r['genome'].key,
+                species=genome_to_species.get(r['genome'].key),
+                fitness=r['fitness'], imitation=r['stats']['comp_imitation'],
+                nodes=nodes, conns=conns,
+            ))
+        snapshot = {
+            'gen': self.generation,
+            'seeds': list(seeds),
+            'top_genomes': top_genomes,
+            'species_table': species,
+            'record': self._record_info,
+        }
+        return record, snapshot
 
-    def _draw_section_progress(self, x, y, genome_num, total, config):
-        y = self._draw_section_header("PROGRESSO", x, y)
+    # ── Schermata del training headless ──
+    # Riepilogo essenziale nella finestra di gioco: grafici, spiegazioni e
+    # tabelle sono nella dashboard HTML (tasto D)
 
-        # Generazione + tempo gen sulla stessa riga
-        gen_text = f"Gen {self.generation + 1}"
-        if self._gen_start_time:
-            elapsed = time.time() - self._gen_start_time
-            gen_text += f"  |  ~{elapsed:.0f}s"
-            if elapsed > 0 and genome_num > 0:
-                gen_text += f"  |  {genome_num / elapsed:.1f} g/s"
-        self._draw_kv(x, y, "", gen_text, (200, 200, 255))
-        y += 20
+    _C_BG = (13, 16, 25)
+    _C_CARD = (24, 29, 44)
+    _C_TEXT = (232, 235, 243)
+    _C_MUTED = (140, 149, 172)
+    _C_GRID = (44, 51, 72)
+    _C_ACCENT = (255, 205, 60)
+    _C_GOOD = (88, 204, 132)
+    _C_BAD = (238, 102, 102)
+    _C_INFO = (102, 162, 255)
 
-        # Barra inline per genoma corrente
-        progress = genome_num / max(1, total)
-        lbl = self._font_small.render(f"Genoma {genome_num}/{total}", True, (180, 180, 200))
-        self.screen.blit(lbl, (x, y))
-        bar_x = x + 170
-        bar_w = 200
-        bar_h = 14
-        pygame.draw.rect(self.screen, (40, 40, 70), (bar_x, y + 2, bar_w, bar_h))
-        pygame.draw.rect(self.screen, (80, 180, 80), (bar_x, y + 2, int(bar_w * progress), bar_h))
-        pygame.draw.rect(self.screen, (100, 100, 140), (bar_x, y + 2, bar_w, bar_h), 1)
-        pct = self._font_small.render(f"{progress * 100:.0f}%", True, (255, 255, 255))
-        self.screen.blit(pct, (bar_x + bar_w + 8, y))
-        y += 20
+    _PHASE_LABELS = {
+        'avvio': "Avvio del training",
+        'rivalutazione': "Rivalutazione del record sulle partite di validazione",
+        'valutazione': "Valutazione dei genomi della generazione",
+        'validazione': "Validazione dei migliori su partite fisse",
+        'fermo': "Training fermo",
+    }
 
-        # Validazione dei migliori a fine generazione (o all'avvio)
-        if self._validation_progress:
-            done, n = self._validation_progress
-            self._draw_kv(x, y, "Validazione:", f"episodio {done}/{n}", (255, 200, 100))
-            y += 20
+    @staticmethod
+    def _fmt(value, decimals=0):
+        """Numero con separatore delle migliaia italiano ('n/d' se assente)."""
+        if value is None or (isinstance(value, float) and not math.isfinite(value)):
+            return "n/d"
+        text = f"{value:,.{decimals}f}"
+        return text.replace(",", "_").replace(".", ",").replace("_", ".")
 
-        return y + 6
+    def _current_history(self):
+        """Generazioni dello storico con la versione di fitness corrente."""
+        if self._dash is None:
+            return []
+        return [r for r in self._dash.history if r.get('fv') == FITNESS_VERSION]
 
-    # ── Sezione B: Fitness ──
+    def _draw_stats_screen(self):
+        """Schermata del training headless: fase, indicatori chiave, andamento."""
+        s = self.screen
+        f = self._fonts
+        s.fill(self._C_BG)
+        x0, x1 = 40, SCREEN_WIDTH - 40
 
-    def _draw_section_fitness(self, x, y):
-        y = self._draw_section_header("FITNESS", x, y)
-
-        # Record di validazione (media sulla suite, senza imitation) e
-        # migliore validato dell'ultima generazione
-        record_color = (100, 255, 100)
-        record_text = self._format_record()
-        if self._new_record_this_gen:
-            record_text += "  *NUOVO*"
-        elif self._last_validation:
-            record_text += f"  (ultima gen {self._last_validation[1]:.0f})"
-        self._draw_kv(x, y, "Record val.:", record_text, record_color)
-        y += 20
-
-        # Gen corrente (compatta: avg / best / stdev su 2 righe)
-        if self._current_gen_fitnesses:
-            n = len(self._current_gen_fitnesses)
-            avg = sum(self._current_gen_fitnesses) / n
-            best = max(self._current_gen_fitnesses)
-            stdev = 0.0
-            if n > 1:
-                stdev = (sum((f - avg) ** 2 for f in self._current_gen_fitnesses) / (n - 1)) ** 0.5
-            self._draw_kv(x, y, "Corrente:", f"avg {avg:.0f}  best {best:.0f}  \u00b1{stdev:.0f}", (180, 220, 180))
-            y += 20
-        else:
-            surf = self._font_small.render("In attesa...", True, (120, 120, 150))
-            self.screen.blit(surf, (x, y))
-            y += 20
-
-        # Gen precedente (una riga)
-        if self._last_gen_stats:
-            self._draw_kv(x, y, "Precedente:", f"avg {self._last_gen_stats['avg_fitness']:.0f}  best {self._last_gen_stats['best_fitness']:.0f}", (160, 180, 200))
-            y += 20
-
-        # Trend (una riga)
-        trend = self._calc_trend(5)
-        if trend:
-            avg_t, best_t = trend
-            self._draw_trend_indicator(x, y, avg_t, "AVG")
-            self._draw_trend_indicator(x + 240, y, best_t, "BEST")
-            y += 20
-        elif len(self._fitness_history) > 0:
-            surf = self._font_small.render(
-                f"Trend: in calcolo... ({len(self._fitness_history)}/10 gen)",
-                True, (120, 120, 150)
-            )
-            self.screen.blit(surf, (x, y))
-            y += 20
-
-        return y + 6
-
-    # ── Sezione C: Scomposizione Fitness ──
-
-    def _draw_section_breakdown(self, x, y):
-        y = self._draw_section_header("SCOMPOSIZIONE FITNESS", x, y)
-
-        # Usa il miglior genoma della gen corrente, o il best di sempre
-        comp = None
-        label_src = ""
-        if self._current_gen_fitness_components:
-            best_idx = 0
-            if self._current_gen_fitnesses:
-                best_val = max(self._current_gen_fitnesses)
-                best_idx = self._current_gen_fitnesses.index(best_val)
-                best_idx = min(best_idx, len(self._current_gen_fitness_components) - 1)
-            comp = self._current_gen_fitness_components[best_idx]
-            label_src = "best gen corrente"
-        elif self._best_genome_components:
-            comp = self._best_genome_components
-            label_src = "record assoluto"
-
-        if not comp:
-            surf = self._font_small.render("In attesa...", True, (120, 120, 150))
-            self.screen.blit(surf, (x, y))
-            return y + 20
-
-        src = self._font_small.render(f"({label_src})", True, (120, 120, 150))
-        self.screen.blit(src, (x, y))
-        y += 18
-
-        # Tutti i componenti della fitness (imitation compreso): TOTALE e'
-        # la fitness del genoma (per il record: media di validazione)
-        items = [
-            ("Kills",      comp.get('comp_kills', 0),               (120, 255, 120)),
-            ("Kill miss.", comp.get('comp_missile_kills', 0),       (255, 180, 80)),
-            ("Kill bomba", comp.get('comp_bomb_kills', 0),          (200, 80, 255)),
-            ("Schivate",   comp.get('comp_dodges', 0),              (100, 220, 180)),
-            ("Near-miss",  comp.get('comp_near_misses', 0),         (100, 255, 200)),
-            ("Precisione", comp.get('comp_accuracy', 0),            (180, 255, 100)),
-            ("Sopravv.",   comp['comp_frames'],                     (100, 200, 255)),
-            ("Livello",    comp['comp_level'],                      (255, 255, 100)),
-            ("Power-up",   comp['comp_powerups'],                   (200, 100, 255)),
-            ("PU avvic.",  comp.get('comp_pu_approach', 0),         (180, 100, 255)),
-            ("Missili",    comp['comp_missiles'],                   (255, 150, 50)),
-            ("Upgrade",    comp['comp_upgrades'],                   (80, 220, 200)),
-            ("Vite",       comp['comp_lives'],                      (255, 80, 80)),
-            ("Scudo",      comp['comp_shield'],                     (255, 120, 50)),
-            ("Idle",       comp['comp_idle'],                       (200, 150, 100)),
-            ("Sparo",      comp.get('comp_shoot_penalty', 0),       (180, 160, 120)),
-            ("Imitation",  comp.get('comp_imitation', 0),           (255, 200, 200)),
-        ]
-
-        max_abs = max(abs(v) for _, v, _ in items) if items else 1
-        max_abs = max(max_abs, 1)
-        bar_max_w = 140
-        row_h = 18
-
-        for label, value, color in items:
-            lbl = self._font_small.render(label, True, (180, 180, 200))
-            self.screen.blit(lbl, (x, y))
-
-            sign = "+" if value >= 0 else ""
-            val_text = f"{sign}{value:.0f}"
-            val_surf = self._font_small.render(val_text, True, color)
-            self.screen.blit(val_surf, (x + 105, y))
-
-            bar_w = int(abs(value) / max_abs * bar_max_w)
-            bar_x = x + 185
-            pygame.draw.rect(self.screen, (40, 40, 70), (bar_x, y + 3, bar_max_w, 10))
-            if bar_w > 0:
-                pygame.draw.rect(self.screen, color, (bar_x, y + 3, bar_w, 10))
-
-            y += row_h
-
-        # Totale
-        pygame.draw.line(self.screen, (60, 60, 100), (x, y), (x + 340, y), 1)
-        y += 3
-        total_fit = sum(v for _, v, _ in items)
-        self._draw_kv(x, y, "TOTALE:", f"{total_fit:.0f}", (255, 255, 255))
-
-        return y + 20
-
-    # ── Sezione D: Specie ──
-
-    def _draw_section_species(self, x, y):
-        y = self._draw_section_header("SPECIE", x, y)
-
-        species_data = []
-        max_stagnation = 0
-
-        if self._population and hasattr(self._population, 'species'):
-            species_set = self._population.species
-            for sid, sp in species_set.species.items():
-                size = len(sp.members)
-                fit = sp.fitness if sp.fitness else 0
-                stag = self.generation - (sp.last_improved or 0) if hasattr(sp, 'last_improved') and sp.last_improved is not None else 0
-                species_data.append((sid, size, fit, stag))
-                max_stagnation = max(max_stagnation, stag)
-
-        num_species = len(species_data)
-        # Specie + stagnazione su una riga
-        stag_color = (255, 100, 100) if max_stagnation >= 10 else (255, 255, 100) if max_stagnation >= 5 else (100, 255, 100)
-        self._draw_kv(x, y, f"Attive: {num_species}", f"Stagnazione: {max_stagnation}", stag_color)
-        y += 20
-
-        if not species_data:
-            return y + 6
-
-        # Ordina per dimensione decrescente, mostra max 5
-        species_data.sort(key=lambda s: s[1], reverse=True)
-        total_pop = sum(s[1] for s in species_data)
-        bar_max_w = 130
-        colors_species = [
-            (100, 220, 255), (80, 200, 220), (60, 180, 200),
-            (50, 160, 180), (40, 140, 160),
-        ]
-
-        for i, (sid, size, fit, stag) in enumerate(species_data[:5]):
-            bar_color = colors_species[min(i, len(colors_species) - 1)]
-            if stag >= 10:
-                bar_color = (255, 120, 50)
-
-            bar_w = int(size / max(1, total_pop) * bar_max_w)
-            lbl = self._font_small.render(f"S{sid}:", True, (150, 150, 180))
-            self.screen.blit(lbl, (x, y))
-
-            bar_x = x + 45
-            pygame.draw.rect(self.screen, (40, 40, 70), (bar_x, y + 2, bar_max_w, 12))
-            if bar_w > 0:
-                pygame.draw.rect(self.screen, bar_color, (bar_x, y + 2, bar_w, 12))
-
-            info = self._font_small.render(f"{size}  fit:{fit:.0f}", True, (180, 180, 200))
-            self.screen.blit(info, (bar_x + bar_max_w + 6, y))
-            y += 18
-
-        return y + 6
-
-    # ── Sezione E: Efficienza ──
-
-    def _draw_section_efficiency(self, x, y, genome_num, config):
-        y = self._draw_section_header("EFFICIENZA", x, y)
-
-        # Tempo totale + gen/min su una riga (generazioni di questa sessione:
-        # dopo un resume self.generation parte dal checkpoint)
+        # Intestazione
+        s.blit(f['title'].render("Training dell'AI", True, self._C_TEXT), (x0, 20))
+        sub = f"Generazione {self.generation}"
         if self._training_start_time:
             elapsed = time.time() - self._training_start_time
-            eff_text = self._format_time(elapsed)
-            gens_done = self.generation - self._start_generation
-            if gens_done > 0:
-                eff_text += f"  |  {gens_done / (elapsed / 60.0):.2f} gen/min"
-            self._draw_kv(x, y, "Tempo:", eff_text, (200, 200, 100))
-            y += 20
+            sub += f"   ·   sessione {self._format_time(elapsed)}"
+            gens = self.generation - self._start_generation
+            if gens > 0 and elapsed > 0:
+                sub += f"   ·   {self._fmt(gens / (elapsed / 60), 1)} generazioni/min"
+        s.blit(f['body'].render(sub, True, self._C_MUTED), (x0, 64))
 
-        # Tempo/gen medio + ultimo su una riga
-        if self._gen_times:
-            avg_t = sum(self._gen_times) / len(self._gen_times)
-            last_t = self._gen_times[-1]
-            t_color = (100, 255, 100) if last_t <= avg_t else (255, 200, 100)
-            self._draw_kv(x, y, "Tempo/gen:", f"avg {avg_t:.1f}s  last {last_t:.1f}s", t_color)
-            y += 20
+        # Fase e avanzamento
+        phase, done, total = self._progress
+        label = self._PHASE_LABELS.get(phase, phase)
+        s.blit(f['label'].render(label, True, self._C_TEXT), (x0, 104))
+        if total:
+            count = f['label'].render(f"{done} / {total}", True, self._C_MUTED)
+            s.blit(count, count.get_rect(topright=(x1, 104)))
+        bar = pygame.Rect(x0, 130, x1 - x0, 12)
+        pygame.draw.rect(s, self._C_CARD, bar, border_radius=6)
+        if total:
+            fill = bar.copy()
+            fill.width = max(12, int(bar.width * done / total))
+            color = self._C_INFO if phase in ('validazione', 'rivalutazione') else self._C_GOOD
+            pygame.draw.rect(s, color, fill, border_radius=6)
 
-        # Genomi valutati in questa sessione
-        self._draw_kv(x, y, "Genomi valutati:", str(self._genomes_evaluated), (180, 180, 200))
-        y += 20
+        hist = self._current_history()
+        self._draw_kpi_tiles(x0, 166, x1, hist)
+        self._draw_progress_chart(pygame.Rect(x0, 330, x1 - x0, 300), hist)
 
-        return y + 6
+        # Piede: comandi
+        y = SCREEN_HEIGHT - 84
+        pygame.draw.line(s, self._C_GRID, (x0, y), (x1, y), 1)
+        s.blit(f['body'].render("D  apre la dashboard dettagliata nel browser (grafici, spiegazioni, tabelle)",
+                                True, self._C_ACCENT), (x0, y + 14))
+        esc = f['body'].render("ESC  ferma il training e salva il checkpoint", True, self._C_TEXT)
+        s.blit(esc, (x0, y + 42))
+        path = os.path.join(DASHBOARD_DIR, "index.html")
+        max_w = x1 - (x0 + esc.get_width() + 40)
+        while len(path) > 10 and f['small'].size(path)[0] > max_w:
+            path = "…" + path[2:]
+        surf = f['small'].render(path, True, self._C_MUTED)
+        s.blit(surf, surf.get_rect(topright=(x1, y + 46)))
 
-    # ── Sezione F: Comportamento AI ──
+    def _draw_kpi_tiles(self, x0, y, x1, hist):
+        """Quattro indicatori: record, record in partita, popolazione, specie."""
+        f = self._fonts
+        gap = 20
+        w = (x1 - x0 - 3 * gap) // 4
+        h = 140
 
-    def _draw_section_behavior(self, x, y):
-        y = self._draw_section_header("COMPORTAMENTO AI (medie gen)", x, y)
-
-        if not self._current_gen_scores:
-            surf = self._font_small.render("In attesa...", True, (120, 120, 150))
-            self.screen.blit(surf, (x, y))
-            return y + 20
-
-        n = len(self._current_gen_scores)
-        avg_score = sum(self._current_gen_scores) / n
-        avg_level = sum(self._current_gen_levels) / n
-        avg_frames = sum(self._current_gen_frames) / n
-        avg_lives = sum(self._current_gen_lives_lost) / n
-        avg_powerups = sum(self._current_gen_powerups) / n
-        avg_missiles = sum(self._current_gen_missiles) / n
-        avg_upgrades = sum(self._current_gen_upgrades) / n
-        avg_idle = sum(self._current_gen_idle_frames) / n
-        idle_pct = (avg_idle / max(1, avg_frames)) * 100
-
-        # Riga 1: Score + Livello + Frames
-        self._draw_kv(x, y, "Score:", f"~{avg_score:.0f}", (180, 220, 180))
-        self._draw_kv(x + 170, y, "Lv:", f"~{avg_level:.1f}", (255, 255, 100))
-        self._draw_kv(x + 310, y, "Frame:", f"~{avg_frames:.0f}", (100, 200, 255))
-        y += 20
-
-        # Riga 2: Vite + Idle + Power-up
-        lives_color = (100, 255, 100) if avg_lives < 1 else (255, 255, 100) if avg_lives < 2 else (255, 100, 100)
-        idle_color = (100, 255, 100) if idle_pct < 15 else (255, 255, 100) if idle_pct < 30 else (255, 100, 100)
-        self._draw_kv(x, y, "Vite perse:", f"~{avg_lives:.1f}", lives_color)
-        self._draw_kv(x + 170, y, "Idle:", f"~{idle_pct:.0f}%", idle_color)
-        self._draw_kv(x + 310, y, "PU/Mis:", f"~{avg_powerups:.1f}/{avg_missiles:.1f}", (200, 100, 255))
-        y += 20
-
-        return y + 6
-
-    # ── Footer ──
-
-    def _draw_footer(self, genome_num, total):
-        y = SCREEN_HEIGHT - 45
-        bar_x = 30
-        bar_w = SCREEN_WIDTH - 60
-        bar_h = 18
-        progress = genome_num / max(1, total)
-
-        pygame.draw.rect(self.screen, (40, 40, 70), (bar_x, y, bar_w, bar_h))
-        fill_w = int(bar_w * progress)
-        if fill_w > 0:
-            pygame.draw.rect(self.screen, (80, 180, 80), (bar_x, y, fill_w, bar_h))
-        pygame.draw.rect(self.screen, (100, 100, 140), (bar_x, y, bar_w, bar_h), 1)
-
-        pct = self._font_small.render(f"{progress * 100:.0f}%", True, (255, 255, 255))
-        self.screen.blit(pct, pct.get_rect(center=(SCREEN_WIDTH // 2, y + bar_h // 2)))
-
-        esc = self._font_small.render("ESC per interrompere", True, (100, 100, 120))
-        self.screen.blit(esc, (SCREEN_WIDTH - 200, y + bar_h + 4))
-
-    # ── Helper: intestazione sezione ──
-
-    def _draw_section_header(self, title, x, y, width=560):
-        """Disegna un'intestazione di sezione con sottolineatura."""
-        surf = self._font_section.render(title, True, (255, 255, 0))
-        self.screen.blit(surf, (x, y))
-        line_y = y + 20
-        pygame.draw.line(self.screen, (60, 60, 100), (x, line_y), (x + width, line_y), 1)
-        return y + 26
-
-    # ── Helper: coppia chiave-valore ──
-
-    def _draw_kv(self, x, y, label, value, color=(200, 200, 255)):
-        """Disegna label (grigio) + valore (colore) sulla stessa riga."""
-        lbl = self._font_small.render(label, True, (180, 180, 200))
-        val = self._font_small.render(str(value), True, color)
-        self.screen.blit(lbl, (x, y))
-        self.screen.blit(val, (x + lbl.get_width() + 8, y))
-
-    # ── Helper: indicatore trend ──
-
-    def _draw_trend_indicator(self, x, y, value, label):
-        """Disegna un valore di trend con freccia e colore."""
-        if value > 2:
-            color = (100, 255, 100)
-            arrow = "\u2191"  # ↑
-        elif value < -2:
-            color = (255, 100, 100)
-            arrow = "\u2193"  # ↓
+        # 1. Record di validazione e variazione nella sessione
+        if self.best_fitness == -math.inf:
+            delta = ("in attesa della prima validazione", self._C_MUTED)
+        elif self._session_start_record == -math.inf:
+            delta = ("primo record di questa sessione", self._C_GOOD)
+        elif self.best_fitness > self._session_start_record:
+            delta = (f"+{self._fmt(self.best_fitness - self._session_start_record)} in questa sessione",
+                     self._C_GOOD)
         else:
-            color = (255, 255, 100)
-            arrow = "~"
+            delta = ("nessun nuovo record in sessione", self._C_MUTED)
+        rec_stats = (self._record_info or {}).get('stats')
+        tiles = [("RECORD DI VALIDAZIONE", self._format_record(), self._C_ACCENT,
+                  "fitness media su 10 partite fisse", delta)]
 
-        text = f"{arrow} {value:+.1f}% {label}"
-        surf = self._font_small.render(text, True, color)
-        self.screen.blit(surf, (x, y))
+        # 2. Come gioca il record
+        if rec_stats:
+            tiles.append(("IL RECORD IN PARTITA", f"{self._fmt(rec_stats['score'])} punti", self._C_TEXT,
+                          f"sopravvive {self._fmt(rec_stats['surv'])} s, livello {self._fmt(rec_stats['level'], 1)}",
+                          (f"{self._fmt(rec_stats['kills'] + rec_stats['missile_kills'] + rec_stats['bomb_kills'], 1)}"
+                           f" uccisioni, {self._fmt(rec_stats['lives_lost'], 1)} vite perse", self._C_MUTED)))
+        else:
+            tiles.append(("IL RECORD IN PARTITA", "n/d", self._C_TEXT, "media delle 10 partite", ("", self._C_MUTED)))
 
-    # ── Helper: calcolo trend ──
+        # 3. Fitness media della popolazione (media mobile) e tendenza
+        means = [r['fit']['mean'] for r in hist if r.get('fit')]
+        if means:
+            rolling = sum(means[-10:]) / len(means[-10:])
+            tr = _trend(means)
+            if tr is None:
+                trend = (f"tendenza tra {8 - len(means)} generazioni", self._C_MUTED)
+            elif tr[0] >= 2:
+                trend = (f"in miglioramento ({tr[1]:+.0f}%)", self._C_GOOD)
+            elif tr[0] <= -2:
+                trend = (f"in calo ({tr[1]:+.0f}%)", self._C_BAD)
+            else:
+                trend = ("stabile, entro il rumore", self._C_MUTED)
+            tiles.append(("FITNESS MEDIA POPOLAZIONE", self._fmt(rolling), self._C_TEXT,
+                          "media mobile di 10 generazioni", trend))
+        else:
+            tiles.append(("FITNESS MEDIA POPOLAZIONE", "n/d", self._C_TEXT,
+                          "media mobile di 10 generazioni", ("", self._C_MUTED)))
 
-    def _calc_trend(self, n=5):
-        """Confronta le ultime n generazioni con le n precedenti.
+        # 4. Specie
+        if self._population is not None:
+            n_species = len(self._population.species.species)
+            stag = max((self.generation - sp.last_improved
+                        for sp in self._population.species.species.values()), default=0)
+            max_stag = self.config.stagnation_config.max_stagnation
+            tiles.append(("SPECIE", str(n_species), self._C_TEXT,
+                          f"soglia di compatibilità {self._fmt(self.config.species_set_config.compatibility_threshold, 2)}",
+                          (f"stallo massimo {stag} su {max_stag} generazioni",
+                           self._C_BAD if stag >= max_stag - 3 else self._C_MUTED)))
 
-        Returns (avg_trend_pct, best_trend_pct) o None se dati insufficienti.
-        """
-        if len(self._fitness_history) < n * 2:
-            return None
-        recent = self._fitness_history[-n:]
-        previous = self._fitness_history[-2 * n:-n]
-        recent_avg = sum(r[0] for r in recent) / n
-        prev_avg = sum(r[0] for r in previous) / n
-        recent_best = sum(r[1] for r in recent) / n
-        prev_best = sum(r[1] for r in previous) / n
+        for i, (title, value, vcolor, line1, (line2, color2)) in enumerate(tiles):
+            rect = pygame.Rect(x0 + i * (w + gap), y, w, h)
+            pygame.draw.rect(self.screen, self._C_CARD, rect, border_radius=10)
+            self.screen.blit(f['label'].render(title, True, self._C_MUTED), (rect.x + 16, rect.y + 14))
+            self.screen.blit(f['kpi'].render(value, True, vcolor), (rect.x + 16, rect.y + 36))
+            self.screen.blit(f['small'].render(line1, True, self._C_MUTED), (rect.x + 16, rect.y + 88))
+            self.screen.blit(f['small'].render(line2, True, color2), (rect.x + 16, rect.y + 110))
 
-        avg_delta = ((recent_avg - prev_avg) / max(1, abs(prev_avg))) * 100
-        best_delta = ((recent_best - prev_best) / max(1, abs(prev_best))) * 100
-        return (avg_delta, best_delta)
+    def _draw_progress_chart(self, rect, hist):
+        """Andamento: record, migliore validato per generazione, media mobile."""
+        s = self.screen
+        f = self._fonts
+        pygame.draw.rect(s, self._C_CARD, rect, border_radius=10)
+        s.blit(f['label'].render("ANDAMENTO DELLA FITNESS (ultime 200 generazioni)", True, self._C_MUTED),
+               (rect.x + 16, rect.y + 12))
+        hist = hist[-200:]
+        if len(hist) < 2:
+            msg = f['body'].render("Il grafico compare dopo due generazioni completate.", True, self._C_MUTED)
+            s.blit(msg, msg.get_rect(center=rect.center))
+            return
+
+        legend = [("record", self._C_GOOD), ("migliore validato della generazione", self._C_INFO),
+                  ("media della popolazione (mobile, 10 gen)", self._C_ACCENT)]
+        lx = rect.right - 16
+        for text, color in reversed(legend):
+            surf = f['small'].render(text, True, self._C_TEXT)
+            lx -= surf.get_width()
+            s.blit(surf, (lx, rect.y + 14))
+            lx -= 18
+            pygame.draw.circle(s, color, (lx + 7, rect.y + 23), 5)
+            lx -= 14
+
+        gens = [r['gen'] for r in hist]
+        means = [r['fit']['mean'] for r in hist]
+        rolling = [sum(means[max(0, i - 9):i + 1]) / len(means[max(0, i - 9):i + 1])
+                   for i in range(len(means))]
+        records = [r.get('record') for r in hist]
+        vals = [(r.get('val') or {}).get('mean') for r in hist]
+        ys = [v for v in rolling + records + vals if v is not None]
+        lo, hi = min(ys), max(ys)
+        if hi - lo < 1:
+            lo, hi = lo - 1, hi + 1
+        # Passo "tondo" (1, 2, 2.5, 5 x 10^n) per 4 intervalli
+        raw = (hi - lo) / 4
+        mag = 10 ** math.floor(math.log10(raw))
+        step = next(m * mag for m in (1, 2, 2.5, 5, 10) if raw <= m * mag + 1e-9)
+        lo, hi = math.floor(lo / step) * step, math.ceil(hi / step) * step
+        ticks = int(round((hi - lo) / step))
+        plot = pygame.Rect(rect.x + 70, rect.y + 46, rect.width - 90, rect.height - 80)
+        g0, g1 = gens[0], gens[-1]
+
+        def px(g):
+            return plot.x + (g - g0) / (g1 - g0) * plot.width
+
+        def py(v):
+            return plot.bottom - (v - lo) / (hi - lo) * plot.height
+
+        for i in range(ticks + 1):
+            v = lo + step * i
+            y = py(v)
+            pygame.draw.line(s, self._C_GRID, (plot.x, y), (plot.right, y), 1)
+            lab = f['small'].render(self._fmt(v, 0 if step >= 1 else 1), True, self._C_MUTED)
+            s.blit(lab, lab.get_rect(midright=(plot.x - 8, y)))
+        for g in (g0, (g0 + g1) // 2, g1):
+            lab = f['small'].render(f"gen {g}", True, self._C_MUTED)
+            s.blit(lab, lab.get_rect(midtop=(px(g), plot.bottom + 6)))
+
+        pts = [(px(g), py(v)) for g, v in zip(gens, rolling)]
+        pygame.draw.lines(s, self._C_ACCENT, False, pts, 3)
+        for g, v in zip(gens, vals):
+            if v is not None:
+                pygame.draw.circle(s, self._C_INFO, (px(g), py(v)), 3)
+        step = []
+        for g, v in zip(gens, records):
+            if v is None:
+                continue
+            if step:
+                step.append((px(g), step[-1][1]))
+            step.append((px(g), py(v)))
+        if len(step) > 1:
+            pygame.draw.lines(s, self._C_GOOD, False, step, 3)
 
     # ── Helper: formattazione tempo ──
 
